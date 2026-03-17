@@ -1,0 +1,23 @@
+{
+  "name": "UI开发管线-S级",
+  "business_type": "ui",
+  "complexity_tier": "s",
+  "total_weeks_default": 21,
+  "milestone_anchors": [
+    { "name": "功能封版", "offset_weeks": 6 },
+    { "name": "CE1", "offset_weeks": 8 },
+    { "name": "CE2", "offset_weeks": 11 },
+    { "name": "CE3", "offset_weeks": 14 },
+    { "name": "版本强更", "offset_weeks": 16 }
+  ],
+  "stages": [
+    { "stage_key": "A1", "role_type": "planner", "name": "需求", "default_weeks": 2, "depends_on": [], "deliverables": ["需求案"] },
+    { "stage_key": "N1", "role_type": "ux_designer", "name": "交互概念", "default_weeks": 2, "depends_on": ["A1"], "deliverables": ["交互概念稿"] },
+    { "stage_key": "UA", "role_type": "ui_designer", "name": "check需求案/拆分", "default_weeks": 1, "depends_on": ["A1"], "deliverables": ["拆分表"] },
+    { "stage_key": "U1", "role_type": "ui_designer", "name": "方案设计（3-4套）", "default_weeks": 3, "depends_on": ["N1", "UA"], "deliverables": ["方案3-4套"] },
+    { "stage_key": "N4", "role_type": "ux_designer", "name": "验收反馈", "default_weeks": 6, "depends_on": ["U1"], "deliverables": ["验收意见"] },
+    { "stage_key": "U3", "role_type": "ui_designer", "name": "UI还原", "default_weeks": 1, "depends_on": ["N4"], "deliverables": ["UI还原稿"] },
+    { "stage_key": "E1", "role_type": "animator", "name": "动画制作", "default_weeks": 2, "depends_on": ["U3"], "deliverables": ["动画文件"] },
+    { "stage_key": "U5", "role_type": "ui_designer", "name": "调优", "default_weeks": 2, "depends_on": ["E1"], "deliverables": ["调优稿"] }
+  ]
+}

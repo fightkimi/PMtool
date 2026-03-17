@@ -1,0 +1,16 @@
+{
+  "name": "UI开发管线-B级",
+  "business_type": "ui",
+  "complexity_tier": "b",
+  "total_weeks_default": 13,
+  "milestone_anchors": [
+    { "name": "功能封版", "offset_weeks": 4 },
+    { "name": "CE1", "offset_weeks": 6 },
+    { "name": "版本强更", "offset_weeks": 10 }
+  ],
+  "stages": [
+    { "stage_key": "A1", "role_type": "planner", "name": "需求", "default_weeks": 2, "depends_on": [], "deliverables": ["需求案"] },
+    { "stage_key": "N1", "role_type": "ux_designer", "name": "交互概念", "default_weeks": 3, "depends_on": ["A1"], "deliverables": ["交互稿"] },
+    { "stage_key": "U1", "role_type": "ui_designer", "name": "UI设计与还原", "default_weeks": 4, "depends_on": ["N1"], "deliverables": ["UI设计稿", "还原稿"] }
+  ]
+}
