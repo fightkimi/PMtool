@@ -40,6 +40,16 @@ npm run db:migrate
 npm run worker
 ```
 
+## 调试命令
+
+```bash
+# Mock 模式（快速验证流程）
+npx tsx scripts/debug/simWecom.ts --project demo-project --msg "@助手 分析需求：登录流程优化"
+
+# 真实 AI 模式（验证输出质量）
+npx tsx scripts/debug/simWecom.ts --project demo-project --msg "@助手 分析需求：登录流程优化" --real-ai
+```
+
 ## 目录概览
 
 ```text

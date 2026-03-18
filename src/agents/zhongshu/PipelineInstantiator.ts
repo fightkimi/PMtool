@@ -74,7 +74,7 @@ export class PipelineInstantiator {
       runId: run.id,
       stageKey: stage.stage_key,
       roleType: stage.role_type,
-      estimatedHours: String(Math.round(stage.default_weeks * 5 * factor * 10) / 10),
+      estimatedHours: Math.round(stage.default_weeks * 5 * factor * 10) / 10,
       dependsOn: stage.depends_on,
       status: 'pending'
     }));

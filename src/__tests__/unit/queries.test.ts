@@ -184,12 +184,12 @@ describe('queries', () => {
 
     await batchUpdateStages([
       { id: 'stage-1', data: { status: 'active' } },
-      { id: 'stage-2', data: { status: 'done', floatDays: '0' } }
+      { id: 'stage-2', data: { status: 'done', floatDays: 0 } }
     ]);
 
     expect(db.update).toHaveBeenCalledTimes(2);
     expect(setMock).toHaveBeenNthCalledWith(1, { status: 'active' });
-    expect(setMock).toHaveBeenNthCalledWith(2, { status: 'done', floatDays: '0' });
+    expect(setMock).toHaveBeenNthCalledWith(2, { status: 'done', floatDays: 0 });
     expect(whereMock).toHaveBeenCalledTimes(2);
   });
 

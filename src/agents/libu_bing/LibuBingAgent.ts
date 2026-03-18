@@ -318,7 +318,7 @@ async function defaultGetDelayedCriticalStages(projectId: string, now: Date): Pr
   const rows = await db
     .select()
     .from(pipelineStageInstances)
-    .where(and(inArray(pipelineStageInstances.runId, runs.map((run) => run.id)), eq(pipelineStageInstances.floatDays, '0')));
+    .where(and(inArray(pipelineStageInstances.runId, runs.map((run) => run.id)), eq(pipelineStageInstances.floatDays, 0)));
   return (await enrichStages(rows)).filter((stage) => stage.plannedEnd != null && stage.plannedEnd.getTime() < now.getTime());
 }
 

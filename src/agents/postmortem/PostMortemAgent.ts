@@ -1,6 +1,7 @@
 import { and, eq, inArray } from 'drizzle-orm';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import type { AgentMessage } from '@/agents/base/types';
+import { extractJson } from '@/lib/parseJson';
 import { db } from '@/lib/db';
 import {
   changeRequests,
@@ -46,6 +47,39 @@ template_adjustments 只针对偏差 > 20% 的工种。`;
 
 function average(values: number[]): number {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : String(item ?? '').trim()))
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function normalizeTemplateAdjustments(
+  value: unknown
+): Record<string, { multiplier: number }> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).flatMap(([roleType, config]) => {
+      if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+        return [];
+      }
+
+      const multiplier = Number.parseFloat(String((config as { multiplier?: unknown }).multiplier ?? ''));
+      if (!Number.isFinite(multiplier)) {
+        return [];
+      }
+
+      return [[roleType, { multiplier }]];
+    })
+  );
 }
 
 export class PostMortemAgent extends BaseAgent {
@@ -124,10 +158,15 @@ export class PostMortemAgent extends BaseAgent {
       ],
       {}
     );
-    const parsed = JSON.parse(aiResponse.content) as {
-      lessons: string[];
-      recommendations: string[];
-      template_adjustments: Record<string, { multiplier: number }>;
+    const parsed = extractJson(aiResponse.content) as {
+      lessons?: unknown;
+      recommendations?: unknown;
+      template_adjustments?: unknown;
+    };
+    const safeReport = {
+      lessons: normalizeStringArray(parsed.lessons),
+      recommendations: normalizeStringArray(parsed.recommendations),
+      template_adjustments: normalizeTemplateAdjustments(parsed.template_adjustments)
     };
 
     await this.upsertPostMortemFn(project.id, {
@@ -137,12 +176,12 @@ export class PostMortemAgent extends BaseAgent {
       riskHitRate: riskHitRate.toFixed(2),
       velocityByRole: velocityByRole as Record<string, number>,
       changeRequestCount,
-      lessonsLearned: parsed.lessons,
-      recommendations: parsed.recommendations
+      lessonsLearned: safeReport.lessons,
+      recommendations: safeReport.recommendations
     });
 
     const relatedPipelines = await this.getPipelinesForProjectFn(project.id);
-    for (const [roleType, config] of Object.entries(parsed.template_adjustments)) {
+    for (const [roleType, config] of Object.entries(safeReport.template_adjustments)) {
       for (const pipeline of relatedPipelines) {
         await this.updatePipelineVelocityFn(pipeline.id, roleType, config.multiplier);
       }
@@ -151,7 +190,7 @@ export class PostMortemAgent extends BaseAgent {
     await this.sendPMCard(project.id, {
       title: '📊 项目复盘报告已生成',
       content: `排期准确率：${Math.round(scheduleAccuracy * 100)}% | 工时准确率：${Math.round(estimateAccuracy * 100)}% | 变更次数：${changeRequestCount}
-关键教训：${parsed.lessons[0] ?? '无'}`,
+关键教训：${safeReport.lessons[0] ?? '无'}`,
       buttons: [{ text: '查看完整报告', action: `view_postmortem:${project.id}` }]
     });
 

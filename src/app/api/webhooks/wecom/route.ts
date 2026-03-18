@@ -22,6 +22,8 @@ type WeComWebhookDeps = {
   token?: string;
 };
 
+type WeComMessageHandlerDeps = Omit<WeComWebhookDeps, 'parseIncoming' | 'token'>;
+
 function verifySignature(token: string, timestamp: string, nonce: string, signature: string): boolean {
   const raw = [token, timestamp, nonce].sort().join('');
   const digest = createHash('sha1').update(raw).digest('hex');
@@ -55,6 +57,40 @@ function getIntentPriority(intent: IntentType): AgentMessage['priority'] {
   return intent === 'change_request' || intent === 'risk_scan' ? 1 : 2;
 }
 
+function stripMention(text: string, botName: string): string {
+  return text
+    .replaceAll(`@${botName}`, '')
+    .replace(/^@\S+\s*/, '')
+    .trim();
+}
+
+function isAddressedMessage(text: string, botName: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (trimmed.includes(`@${botName}`)) {
+    return true;
+  }
+
+  const leadingMention = trimmed.match(/^@([^\s]+)/)?.[1] ?? '';
+  if (!leadingMention) {
+    return false;
+  }
+
+  if (leadingMention === botName || leadingMention === '助手') {
+    return true;
+  }
+
+  return leadingMention.endsWith('助手');
+}
+
+function isGreeting(text: string, botName: string): boolean {
+  const normalized = stripMention(text, botName).replace(/\s+/g, '').toLowerCase();
+  return ['你好', '您好', 'hi', 'hello', '在吗', '在嘛', '嗨'].includes(normalized);
+}
+
 async function defaultGetProjectByGroupId(groupId: string) {
   const rows = await db.select().from(projects).where(eq(projects.wecomGroupId, groupId));
   return rows[0] ?? null;
@@ -83,14 +119,7 @@ async function defaultSendUserCard(userId: string, card: IMCard) {
 
 export function createWeComWebhookHandlers(deps: WeComWebhookDeps = {}) {
   const parseIncoming = deps.parseIncoming ?? ((payload: unknown) => registry.getIM().parseIncoming(payload));
-  const parseIntentFn = deps.parseIntent ?? parseIntent;
-  const enqueue = deps.enqueue ?? ((message: AgentMessage) => agentQueue.enqueue(message));
-  const getProjectByGroupId = deps.getProjectByGroupId ?? defaultGetProjectByGroupId;
-  const rejectChangeRequest = deps.rejectChangeRequest ?? defaultRejectChangeRequest;
-  const getPostMortemByProjectId = deps.getPostMortemByProjectId ?? defaultGetPostMortemByProjectId;
-  const sendGroupMarkdown = deps.sendGroupMarkdown ?? defaultSendGroupMarkdown;
-  const sendUserCard = deps.sendUserCard ?? defaultSendUserCard;
-  const now = deps.now ?? (() => new Date());
+  const handleIncomingMessage = createWeComMessageHandler(deps);
   const botName = deps.botName ?? process.env.WECOM_BOT_NAME ?? '助手';
   const token = deps.token ?? process.env.WECOM_BOT_TOKEN ?? '';
 
@@ -130,68 +159,110 @@ export function createWeComWebhookHandlers(deps: WeComWebhookDeps = {}) {
       if (!msg) {
         return Response.json({}, { status: 200 });
       }
-
-      const project = await getProjectByGroupId(msg.groupId);
-      if (!project) {
-        return Response.json({}, { status: 200 });
-      }
-
-      if (msg.type === 'button_click' && msg.buttonAction) {
-        const [actionType, id] = msg.buttonAction.split(':');
-        if (actionType === 'change_confirmed' && id) {
-          await enqueue(
-            createMessage(
-              'shangshu',
-              'change_confirmed',
-              { change_request_id: id },
-              project,
-              1,
-              now()
-            )
-          );
-        } else if (actionType === 'change_cancelled' && id) {
-          await rejectChangeRequest(id);
-          await sendGroupMarkdown(project, '⚪ 变更已取消，当前排期保持不变。');
-        } else if (actionType === 'view_postmortem') {
-          const report = await getPostMortemByProjectId(project.id);
-          await sendUserCard(msg.userId, {
-            title: '项目复盘摘要',
-            content: report
-              ? `排期准确率：${report.scheduleAccuracy ?? '--'}\n工时准确率：${report.estimateAccuracy ?? '--'}\n关键教训：${report.lessonsLearned[0] ?? '无'}`
-              : '当前项目还没有生成复盘报告。'
-          });
-        }
-
-        return Response.json({}, { status: 200 });
-      }
-
-      const text = msg.text ?? '';
-      const isAddressed = msg.type === 'enter_session' || text.includes(`@${botName}`);
-      if (!isAddressed) {
-        return Response.json({}, { status: 200 });
-      }
-
-      const parsed = parseIntentFn(text);
-      await enqueue(
-        createMessage(
-          'zhongshui',
-          'request',
-          {
-            intent: parsed.intent,
-            params: {
-              ...parsed.params,
-              text
-            },
-            project_id: project.id
-          },
-          project,
-          getIntentPriority(parsed.intent),
-          now()
-        )
-      );
+      await handleIncomingMessage(msg, botName);
 
       return Response.json({}, { status: 200 });
     }
+  };
+}
+
+export function createWeComMessageHandler(deps: WeComMessageHandlerDeps = {}) {
+  const parseIntentFn = deps.parseIntent ?? parseIntent;
+  const enqueue = deps.enqueue ?? ((message: AgentMessage) => agentQueue.enqueue(message));
+  const getProjectByGroupId = deps.getProjectByGroupId ?? defaultGetProjectByGroupId;
+  const rejectChangeRequest = deps.rejectChangeRequest ?? defaultRejectChangeRequest;
+  const getPostMortemByProjectId = deps.getPostMortemByProjectId ?? defaultGetPostMortemByProjectId;
+  const sendGroupMarkdown = deps.sendGroupMarkdown ?? defaultSendGroupMarkdown;
+  const sendUserCard = deps.sendUserCard ?? defaultSendUserCard;
+  const now = deps.now ?? (() => new Date());
+
+  return async function handleIncomingMessage(msg: IncomingMessage, botName = process.env.WECOM_BOT_NAME ?? '助手') {
+    console.info(
+      '[WeComRoute] 收到消息:',
+      JSON.stringify({
+        type: msg.type,
+        userId: msg.userId,
+        groupId: msg.groupId,
+        text: msg.text
+      })
+    );
+
+    const project = await getProjectByGroupId(msg.groupId);
+    if (!project) {
+      console.warn(`[WeComRoute] 未找到群 ${msg.groupId} 对应的项目配置`);
+      return;
+    }
+
+    if (msg.type === 'button_click' && msg.buttonAction) {
+      const [actionType, id] = msg.buttonAction.split(':');
+      if (actionType === 'change_confirmed' && id) {
+        await enqueue(
+          createMessage(
+            'shangshu',
+            'change_confirmed',
+            { change_request_id: id },
+            project,
+            1,
+            now()
+          )
+        );
+      } else if (actionType === 'change_cancelled' && id) {
+        await rejectChangeRequest(id);
+        await sendGroupMarkdown(project, '⚪ 变更已取消，当前排期保持不变。');
+      } else if (actionType === 'view_postmortem') {
+        const report = await getPostMortemByProjectId(project.id);
+        await sendUserCard(msg.userId, {
+          title: '项目复盘摘要',
+          content: report
+            ? `排期准确率：${report.scheduleAccuracy ?? '--'}\n工时准确率：${report.estimateAccuracy ?? '--'}\n关键教训：${report.lessonsLearned[0] ?? '无'}`
+            : '当前项目还没有生成复盘报告。'
+        });
+      }
+
+      return;
+    }
+
+    const text = msg.text ?? '';
+    const isAddressed = msg.type === 'enter_session' || isAddressedMessage(text, botName);
+    if (!isAddressed) {
+      console.info(`[WeComRoute] 消息未 @${botName}，忽略`);
+      return;
+    }
+
+    const parsed = parseIntentFn(text);
+    if (parsed.intent === 'unknown' && isGreeting(text, botName)) {
+      await sendGroupMarkdown(
+        project,
+        `你好，我是${botName}。\n\n可以直接 @我 这样说：\n- 分析需求：登录流程优化\n- 本周进度怎么样\n- 有没有风险\n- 这个需求要延期，帮我评估变更\n- 做个项目复盘`
+      );
+      return;
+    }
+
+    console.info(
+      '[WeComRoute] 识别意图:',
+      JSON.stringify({
+        intent: parsed.intent,
+        params: parsed.params,
+        projectId: project.id
+      })
+    );
+    await enqueue(
+      createMessage(
+        'zhongshui',
+        'request',
+        {
+          intent: parsed.intent,
+          params: {
+            ...parsed.params,
+            text
+          },
+          project_id: project.id
+        },
+        project,
+        getIntentPriority(parsed.intent),
+        now()
+      )
+    );
   };
 }
 

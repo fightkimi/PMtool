@@ -1,3 +1,4 @@
+import '@/lib/loadEnv';
 import { randomUUID } from 'node:crypto';
 import cron from 'node-cron';
 import { eq } from 'drizzle-orm';
@@ -15,6 +16,9 @@ import postMortemAgent from '@/agents/postmortem/PostMortemAgent';
 import shangShuAgent from '@/agents/shangshu/ShangShuAgent';
 import zhongShuAgent from '@/agents/zhongshu/ZhongShuAgent';
 import zhongshuiAgent from '@/agents/zhongshui/ZhongshuiAgent';
+import { registry } from '@/adapters/registry';
+import { WeComBotAdapter } from '@/adapters/wecom/WeComBotAdapter';
+import { createWeComMessageHandler } from '@/app/api/webhooks/wecom/route';
 import { db } from '@/lib/db';
 import { projects, workspaces } from '@/lib/schema';
 
@@ -104,6 +108,17 @@ export async function start() {
   ].forEach((agent) => router.register(agent));
 
   const worker = agentQueue.createWorker(router);
+  const messageHandler = createWeComMessageHandler();
+  const imAdapter = registry.getIM();
+  const botAdapter =
+    (process.env.WECOM_MODE ?? 'bot') === 'bot' && imAdapter instanceof WeComBotAdapter ? imAdapter : null;
+
+  if (botAdapter) {
+    botAdapter.onMessage(async (message) => {
+      await messageHandler(message);
+    });
+    await botAdapter.start();
+  }
 
   cron.schedule('0 8 * * *', () => {
     void enqueueCapacitySnapshots();
@@ -122,6 +137,7 @@ export async function start() {
   });
 
   process.on('SIGTERM', async () => {
+    await botAdapter?.stop();
     await worker.close();
     process.exit(0);
   });

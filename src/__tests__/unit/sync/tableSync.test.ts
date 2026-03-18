@@ -50,8 +50,8 @@ function createTask(id: string, tableRecordId: string | null = null): SelectTask
     assigneeId: null,
     reviewerId: null,
     department: 'libu_gong',
-    estimatedHours: '8',
-    actualHours: '0',
+    estimatedHours: 8,
+    actualHours: 0,
     earliestStart: null,
     latestFinish: null,
     floatDays: null,
@@ -76,9 +76,9 @@ function createStage(tableRecordId: string | null = null): SelectPipelineStageIn
     plannedEnd: new Date('2026-03-20T00:00:00.000Z'),
     actualStart: null,
     actualEnd: null,
-    estimatedHours: '16',
+    estimatedHours: 16,
     dependsOn: [],
-    floatDays: '0',
+    floatDays: 0,
     status: 'pending',
     tableRecordId,
     taskId: null,
@@ -259,7 +259,7 @@ describe('tableSync', () => {
     expect(fields).toEqual(
       expect.objectContaining({
         status: 'done',
-        actualHours: '12'
+        actualHours: 12
       })
     );
     expect(fields.dueAt).toBeInstanceOf(Date);

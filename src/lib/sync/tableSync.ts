@@ -21,7 +21,7 @@ function formatDate(value: Date | null | undefined): string {
   return value ? value.toLocaleDateString('zh-CN') : '';
 }
 
-function numericValue(value: string | null | undefined): number {
+function numericValue(value: number | string | null | undefined): number {
   return value == null ? 0 : Number(value);
 }
 
@@ -158,7 +158,7 @@ export function tableRecordToTaskFields(record: DocRecord): Partial<InsertTask> 
   if (typeof record.实际工时 === 'number' || typeof record.实际工时 === 'string') {
     const value = Number(record.实际工时);
     if (!Number.isNaN(value)) {
-      fields.actualHours = String(value);
+      fields.actualHours = value;
     }
   }
 

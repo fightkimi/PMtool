@@ -81,9 +81,10 @@ export interface AIUsage {
 }
 
 export interface AIOptions {
-  model?: 'claude' | 'deepseek';
+  model?: string;
   temperature?: number;
   maxTokens?: number;
+  agentType?: AgentType | string;
   onUsage?: (u: AIUsage) => void;
 }
 
@@ -142,6 +143,9 @@ export interface WeComAdapterConfig {
   agentSecret?: string;
   botToken?: string;
   botAesKey?: string;
+  botId?: string;
+  botSecret?: string;
+  mode?: 'bot' | 'webhook';
   baseUrl?: string;
   groupWebhookMap?: Record<string, string>;
   fetcher?: typeof fetch;
@@ -165,6 +169,10 @@ export interface AIAdapterConfig {
   deepseekApiKey?: string;
   anthropicModel?: string;
   deepseekBaseUrl?: string;
+  minimaxApiKey?: string;
+  minimaxModel?: string;
+  minimaxBaseUrl?: string;
+  apiKeys?: Record<string, string>;
   fetcher?: typeof fetch;
   anthropicClient?: AnthropicMessageClient;
 }
@@ -181,6 +189,6 @@ export interface AdapterConfig {
   code?: CodeAdapterConfig;
 }
 
-export type SupportedAIModel = 'claude' | 'deepseek';
+export type SupportedAIModel = string;
 
-export type ModelSelector = (agentType: AgentType) => SupportedAIModel;
+export type ModelSelector = (agentType: AgentType) => string;

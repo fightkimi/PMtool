@@ -99,6 +99,37 @@ describe('wecom webhook', () => {
     );
   });
 
+  it('accepts configured full bot name mentions', async () => {
+    const enqueue = vi.fn().mockResolvedValue('job-1');
+    const handlers = createWeComWebhookHandlers({
+      parseIncoming: vi.fn().mockResolvedValue({
+        type: 'text',
+        userId: 'u1',
+        groupId: 'g1',
+        text: '@研发项目管理助手 分析需求，登录流程优化',
+        rawPayload: {}
+      }),
+      parseIntent: vi.fn().mockReturnValue({
+        intent: 'parse_requirement',
+        params: { content: '登录流程优化' }
+      }),
+      enqueue,
+      getProjectByGroupId: vi.fn().mockResolvedValue(projectFixture),
+      botName: '研发项目管理助手'
+    });
+
+    await handlers.POST(createRequest('<xml />'));
+
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: 'zhongshui',
+        payload: expect.objectContaining({
+          intent: 'parse_requirement'
+        })
+      })
+    );
+  });
+
   it('routes change_confirmed button click to shangshu', async () => {
     const enqueue = vi.fn().mockResolvedValue('job-1');
     const handlers = createWeComWebhookHandlers({

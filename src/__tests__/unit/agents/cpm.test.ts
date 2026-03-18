@@ -12,7 +12,7 @@ function makeStage(
   id: string,
   stageKey: string,
   dependsOn: string[],
-  estimatedHours: string,
+  estimatedHours: number,
   overrides: Partial<SelectPipelineStageInstance> = {}
 ): SelectPipelineStageInstance {
   return {
@@ -27,7 +27,7 @@ function makeStage(
     actualEnd: null,
     estimatedHours,
     dependsOn,
-    floatDays: '0',
+    floatDays: 0,
     status: 'pending',
     tableRecordId: null,
     taskId: null,
@@ -140,9 +140,9 @@ describe('CPMEngine', () => {
   it('computes critical path for linear chain', async () => {
     const { engine } = createEngine({
       stages: [
-        makeStage('a', 'A', [], '40'),
-        makeStage('b', 'B', ['A'], '40'),
-        makeStage('c', 'C', ['B'], '40')
+        makeStage('a', 'A', [], 40),
+        makeStage('b', 'B', ['A'], 40),
+        makeStage('c', 'C', ['B'], 40)
       ]
     });
 
@@ -155,10 +155,10 @@ describe('CPMEngine', () => {
   it('computes float for parallel branch', async () => {
     const { engine } = createEngine({
       stages: [
-        makeStage('a', 'A', [], '40'),
-        makeStage('b', 'B', ['A'], '40'),
-        makeStage('c', 'C', ['A'], '24'),
-        makeStage('d', 'D', ['B', 'C'], '16')
+        makeStage('a', 'A', [], 40),
+        makeStage('b', 'B', ['A'], 40),
+        makeStage('c', 'C', ['A'], 24),
+        makeStage('d', 'D', ['B', 'C'], 16)
       ]
     });
 
@@ -175,8 +175,8 @@ describe('CPMEngine', () => {
         plannedEnd: new Date('2026-04-06T00:00:00Z')
       },
       stages: [
-        makeStage('a', 'A', [], '40'),
-        makeStage('b', 'B', ['A'], '40')
+        makeStage('a', 'A', [], 40),
+        makeStage('b', 'B', ['A'], 40)
       ]
     });
 
@@ -188,15 +188,15 @@ describe('CPMEngine', () => {
 
   it('propagates cascade update through successors', async () => {
     const stages = [
-      makeStage('a', 'A', [], '40', {
+      makeStage('a', 'A', [], 40, {
         plannedStart: new Date('2026-04-01T00:00:00Z'),
         plannedEnd: new Date('2026-04-06T00:00:00Z')
       }),
-      makeStage('b', 'B', ['A'], '24', {
+      makeStage('b', 'B', ['A'], 24, {
         plannedStart: new Date('2026-04-06T00:00:00Z'),
         plannedEnd: new Date('2026-04-09T00:00:00Z')
       }),
-      makeStage('c', 'C', ['B'], '16', {
+      makeStage('c', 'C', ['B'], 16, {
         plannedStart: new Date('2026-04-09T00:00:00Z'),
         plannedEnd: new Date('2026-04-11T00:00:00Z')
       })
@@ -216,15 +216,15 @@ describe('CPMEngine', () => {
 
   it('escalates when cascade impacts milestone', async () => {
     const stages = [
-      makeStage('a', 'A', [], '40', {
+      makeStage('a', 'A', [], 40, {
         plannedStart: new Date('2026-04-01T00:00:00Z'),
         plannedEnd: new Date('2026-04-06T00:00:00Z'),
-        floatDays: '0'
+        floatDays: 0
       }),
-      makeStage('b', 'B', ['A'], '40', {
+      makeStage('b', 'B', ['A'], 40, {
         plannedStart: new Date('2026-04-20T00:00:00Z'),
         plannedEnd: new Date('2026-04-25T00:00:00Z'),
-        floatDays: '0'
+        floatDays: 0
       })
     ];
     const { engine, enqueue, sendCard } = createEngine({
@@ -258,12 +258,12 @@ describe('CPMEngine', () => {
     });
 
     const conflicts = engine.detectConflicts([
-      makeStage('a', 'A', [], '40', {
+      makeStage('a', 'A', [], 40, {
         assigneeId: 'u1',
         plannedStart: new Date('2026-04-01T00:00:00Z'),
         plannedEnd: new Date('2026-04-10T00:00:00Z')
       }),
-      makeStage('b', 'B', [], '40', {
+      makeStage('b', 'B', [], 40, {
         assigneeId: 'u1',
         plannedStart: new Date('2026-04-08T00:00:00Z'),
         plannedEnd: new Date('2026-04-15T00:00:00Z')
@@ -280,12 +280,12 @@ describe('CPMEngine', () => {
     });
 
     const conflicts = engine.detectConflicts([
-      makeStage('a', 'A', [], '40', {
+      makeStage('a', 'A', [], 40, {
         assigneeId: 'u1',
         plannedStart: new Date('2026-04-01T00:00:00Z'),
         plannedEnd: new Date('2026-04-10T00:00:00Z')
       }),
-      makeStage('b', 'B', [], '40', {
+      makeStage('b', 'B', [], 40, {
         assigneeId: 'u1',
         plannedStart: new Date('2026-04-11T00:00:00Z'),
         plannedEnd: new Date('2026-04-15T00:00:00Z')

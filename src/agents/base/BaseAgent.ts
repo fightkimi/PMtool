@@ -6,6 +6,7 @@ import { db } from '@/lib/db';
 import { createAgentJob, updateAgentJob } from '@/lib/queries/agent_jobs';
 import { getProjectById } from '@/lib/queries/projects';
 import { users, type SelectProject } from '@/lib/schema';
+import { agentLogger } from '@/workers/logger';
 import type { AgentMessage, AgentType } from './types';
 
 type CachedProject = {
@@ -53,6 +54,7 @@ export abstract class BaseAgent {
   abstract handle(message: AgentMessage): Promise<AgentMessage>;
 
   async run(message: AgentMessage): Promise<AgentMessage> {
+    agentLogger.agentStart(message.from, message.to, message.payload);
     const startedAt = this.now();
     const createdJob = await this.createAgentJobFn({
       workspaceId: message.context.workspace_id,
@@ -83,6 +85,7 @@ export abstract class BaseAgent {
         output: result as unknown as Record<string, unknown>,
         finishedAt: this.now()
       });
+      agentLogger.agentEnd(this.agentType, 'success', result);
       return result;
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -91,6 +94,7 @@ export abstract class BaseAgent {
         errorMessage: err.message,
         finishedAt: this.now()
       });
+      agentLogger.agentEnd(this.agentType, 'failed', undefined, err.message);
       throw err;
     }
   }

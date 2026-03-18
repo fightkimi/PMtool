@@ -194,7 +194,7 @@ export class LibuLi2Agent extends BaseAgent {
 
     await this.notifyGroup(
       project.id,
-      `${task.title} 状态更新：${statusLabelMap[payload.old_status]} → ${statusLabelMap[payload.new_status]} · 负责人：${assignee?.name ?? '未分配'}`
+      `${task.title} 状态更新：${statusLabelMap[payload.old_status]} → ${statusLabelMap[payload.new_status]} · @${assignee?.name ?? '未分配'}`
     );
 
     return this.createMessage(
@@ -223,9 +223,7 @@ export class LibuLi2Agent extends BaseAgent {
       }
       await this.getIMAdapter().sendDM(user.imUserId, {
         type: 'text',
-        text: `[任务名] 截止时间调整
-[旧日期 MM/DD] → [新日期 MM/DD]
-原因：需求变更「${changeRequest.title}」`
+        text: `${changeRequest.title} 截止时间调整：旧日期 MM/DD → 新日期 MM/DD（原因：${changeRequest.title}）`
       });
     }
 

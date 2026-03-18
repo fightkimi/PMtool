@@ -2,7 +2,8 @@ import { AIModelAdapter } from '@/adapters/ai/AIModelAdapter';
 import { GitHubAdapter } from '@/adapters/github/GitHubAdapter';
 import { TencentDocAdapter } from '@/adapters/tencentdoc/TencentDocAdapter';
 import type { AdapterConfig, AIAdapter, CodeAdapter, DocAdapter, IMAdapter } from '@/adapters/types';
-import { WeComAdapter } from '@/adapters/wecom/WeComAdapter';
+import { WeComBotAdapter } from '@/adapters/wecom/WeComBotAdapter';
+import { WeComWebhookAdapter } from '@/adapters/wecom/WeComWebhookAdapter';
 
 export class AdapterRegistry {
   private im: IMAdapter;
@@ -11,7 +12,9 @@ export class AdapterRegistry {
   private code?: CodeAdapter;
 
   constructor(config: AdapterConfig) {
-    this.im = new WeComAdapter(config.wecom ?? {});
+    const wecomConfig = config.wecom ?? {};
+    const mode = wecomConfig.mode ?? 'bot';
+    this.im = mode === 'webhook' ? new WeComWebhookAdapter(wecomConfig) : new WeComBotAdapter(wecomConfig);
     this.doc = new TencentDocAdapter(config.tencentdoc ?? {});
     this.ai = new AIModelAdapter(config.ai ?? {});
     this.code = config.code?.provider === 'github' && config.code.token ? new GitHubAdapter(config.code.token) : undefined;
@@ -40,7 +43,10 @@ export const registry = new AdapterRegistry({
     agentId: process.env.WECOM_AGENT_ID,
     agentSecret: process.env.WECOM_AGENT_SECRET,
     botToken: process.env.WECOM_BOT_TOKEN,
-    botAesKey: process.env.WECOM_BOT_AESKEY
+    botAesKey: process.env.WECOM_BOT_AESKEY,
+    botId: process.env.WECOM_BOT_ID,
+    botSecret: process.env.WECOM_BOT_SECRET,
+    mode: (process.env.WECOM_MODE as 'bot' | 'webhook' | undefined) ?? 'bot'
   },
   tencentdoc: {
     appId: process.env.TENCENT_DOC_APP_ID,

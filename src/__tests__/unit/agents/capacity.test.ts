@@ -27,7 +27,7 @@ const projectFixture: SelectProject = {
   updatedAt: new Date()
 };
 
-function createStage(id: string, assigneeId: string, estimatedHours: string): SelectPipelineStageInstance {
+function createStage(id: string, assigneeId: string, estimatedHours: number): SelectPipelineStageInstance {
   return {
     id,
     runId: 'run-1',
@@ -40,7 +40,7 @@ function createStage(id: string, assigneeId: string, estimatedHours: string): Se
     actualEnd: null,
     estimatedHours,
     dependsOn: [],
-    floatDays: '0',
+    floatDays: 0,
     status: 'active',
     tableRecordId: null,
     taskId: null,
@@ -99,7 +99,7 @@ function createAgent(overloadedSnapshots: SelectCapacitySnapshot[] = []) {
     now: () => new Date('2026-03-17T00:00:00Z'),
     getActiveProjects: vi.fn().mockResolvedValue([projectFixture]),
     getTasksByProject: vi.fn().mockResolvedValue([]),
-    getStagesByProject: vi.fn().mockResolvedValue([createStage('s1', 'u1', '48'), createStage('s2', 'u2', '20')]),
+    getStagesByProject: vi.fn().mockResolvedValue([createStage('s1', 'u1', 48), createStage('s2', 'u2', 20)]),
     getUsersByIds: vi.fn().mockResolvedValue(users),
     upsertSnapshot,
     getOverloadedSnapshots: vi.fn().mockResolvedValue(overloadedSnapshots)

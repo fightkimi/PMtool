@@ -233,6 +233,95 @@ function printDetail(job: SelectAgentJob) {
   console.log(highlightJson(job.output ?? null));
 }
 
+function maskDatabaseUrl(url?: string): string {
+  if (!url) {
+    return '(未设置，当前会回退到 src/lib/db.ts 里的默认值)';
+  }
+
+  return url.replace(/:\/\/([^:]+):([^@]+)@/, '://$1:***@');
+}
+
+function collectErrorTexts(error: unknown): string[] {
+  const texts: string[] = [];
+  const queue: unknown[] = [error];
+  const visited = new Set<unknown>();
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) {
+      continue;
+    }
+    visited.add(current);
+
+    if (current instanceof Error) {
+      texts.push(current.message);
+      const maybeCause = current as Error & { cause?: unknown };
+      if (maybeCause.cause) {
+        queue.push(maybeCause.cause);
+      }
+      continue;
+    }
+
+    if (typeof current === 'object') {
+      const record = current as {
+        message?: unknown;
+        cause?: unknown;
+        code?: unknown;
+        errors?: unknown;
+      };
+      if (typeof record.message === 'string') {
+        texts.push(record.message);
+      }
+      if (record.cause) {
+        queue.push(record.cause);
+      }
+      if (Array.isArray(record.errors)) {
+        queue.push(...record.errors);
+      }
+      if (typeof record.code === 'string') {
+        texts.push(record.code);
+      }
+      continue;
+    }
+
+    if (typeof current === 'string') {
+      texts.push(current);
+    }
+  }
+
+  return texts;
+}
+
+function printFriendlyError(error: unknown) {
+  const joined = collectErrorTexts(error).join('\n');
+  const databaseUrl = maskDatabaseUrl(process.env.DATABASE_URL);
+
+  console.error(colorize('[ERROR] 无法读取 agent_jobs', 'red'));
+
+  if (/ECONNREFUSED|connect|connection|ENOTFOUND|Failed query/i.test(joined)) {
+    console.error('看起来当前数据库没有连通。');
+    console.error(`DATABASE_URL: ${databaseUrl}`);
+    console.error('');
+    console.error('建议检查：');
+    console.error('1. PostgreSQL 是否已经启动');
+    console.error('2. .env.local 里的 DATABASE_URL 是否正确');
+    console.error('3. 测试库是否监听在 localhost:5433（如果你走测试环境）');
+    console.error('4. 是否已经执行过 `npm run db:migrate`');
+  } else if (/relation .*agent_jobs.* does not exist|does not exist/i.test(joined)) {
+    console.error('数据库已连通，但 `agent_jobs` 表不存在。');
+    console.error('');
+    console.error('建议执行：');
+    console.error('1. `npm run db:migrate`');
+    console.error('2. 重新运行 `npx tsx scripts/debug/showJobs.ts --limit 20`');
+  } else if (/password authentication failed|auth/i.test(joined)) {
+    console.error('数据库认证失败，请检查用户名、密码和连接串。');
+    console.error(`DATABASE_URL: ${databaseUrl}`);
+  } else {
+    console.error('原始错误摘要：');
+    console.error(joined || String(error));
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -258,7 +347,6 @@ async function main() {
 }
 
 void main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
+  printFriendlyError(error);
   process.exitCode = 1;
 });

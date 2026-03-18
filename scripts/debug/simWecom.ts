@@ -1,45 +1,117 @@
 #!/usr/bin/env tsx
 import { config as loadEnv } from 'dotenv';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
-import { inspect } from 'node:util';
+import { dirname, resolve } from 'node:path';
+import { AIModelAdapter } from '@/adapters/ai/AIModelAdapter';
+import { getAllAliases, resolveModel } from '@/adapters/ai/providers';
 import { parse as parseIntent, type IntentType } from '@/adapters/wecom/IntentParser';
 import type { AIAdapter, AIMessage, AIOptions, AIResponse, IMAdapter, IMCard, IMMessage, IncomingMessage } from '@/adapters/types';
+import { MenXiaAgent } from '@/agents/menxia/MenXiaAgent';
+import { ShangShuAgent } from '@/agents/shangshu/ShangShuAgent';
 import { ZhongShuAgent } from '@/agents/zhongshu/ZhongShuAgent';
 import { ZhongshuiAgent } from '@/agents/zhongshui/ZhongshuiAgent';
-import type { AgentMessage, AgentType } from '@/agents/base/types';
+import type { AgentMessage } from '@/agents/base/types';
 import type {
   InsertAgentJob,
+  InsertChangeRequest,
   InsertTask,
   PipelineBusinessType,
   PipelineComplexityTier,
   SelectAgentJob,
+  SelectChangeRequest,
   SelectPipeline,
   SelectPipelineRun,
   SelectProject,
-  SelectTask
+  SelectTask,
+  SelectUser
 } from '@/lib/schema';
+import { agentLogger, type StructuredLogEntry } from '@/workers/logger';
 
 loadEnv({ path: resolve(process.cwd(), '.env.local'), quiet: true });
 
 type CliArgs = {
   projectId: string;
   message: string;
+  rawLogFile?: string;
+  realAi: boolean;
+  smoke: boolean;
 };
 
 type MemoryState = {
   jobs: SelectAgentJob[];
   tasks: SelectTask[];
-  wecomLogs: string[];
   runs: SelectPipelineRun[];
+  changeRequests: SelectChangeRequest[];
+  users: SelectUser[];
+};
+
+type ResultLog = StructuredLogEntry & {
+  type: 'RESULT';
+  summary: string;
+};
+
+type DebugUserSeed = {
+  id: string;
+  name: string;
+  imUserId: string;
+  role: SelectUser['role'];
+  department: 'libu_li' | 'libu_hu' | 'libu_li2' | 'libu_bing' | 'libu_xing' | 'libu_gong';
+  workHoursPerWeek: number;
 };
 
 const botName = process.env.WECOM_BOT_NAME ?? '助手';
+
+const DEBUG_USERS: DebugUserSeed[] = [
+  {
+    id: 'debug-user-pm',
+    name: '调试PM',
+    imUserId: 'debug-im-pm',
+    role: 'pm',
+    department: 'libu_li',
+    workHoursPerWeek: 40
+  },
+  {
+    id: 'debug-user-dev',
+    name: '调试开发',
+    imUserId: 'debug-im-dev',
+    role: 'dev',
+    department: 'libu_gong',
+    workHoursPerWeek: 40
+  },
+  {
+    id: 'debug-user-qa',
+    name: '调试测试',
+    imUserId: 'debug-im-qa',
+    role: 'qa',
+    department: 'libu_xing',
+    workHoursPerWeek: 40
+  },
+  {
+    id: 'debug-user-designer',
+    name: '调试设计',
+    imUserId: 'debug-im-ui',
+    role: 'designer',
+    department: 'libu_li2',
+    workHoursPerWeek: 40
+  },
+  {
+    id: 'debug-user-manager',
+    name: '调试管理',
+    imUserId: 'debug-im-mgr',
+    role: 'manager',
+    department: 'libu_bing',
+    workHoursPerWeek: 40
+  }
+];
 
 function parseArgs(argv: string[]): CliArgs {
   const args = [...argv];
   let projectId = '';
   let message = '';
+  let rawLogFile = '';
+  let realAi = false;
+  let smoke = false;
 
   while (args.length > 0) {
     const current = args.shift();
@@ -50,6 +122,21 @@ function parseArgs(argv: string[]): CliArgs {
 
     if (current === '--msg') {
       message = args.shift() ?? '';
+      continue;
+    }
+
+    if (current === '--raw-log-file') {
+      rawLogFile = args.shift() ?? '';
+      continue;
+    }
+
+    if (current === '--real-ai') {
+      realAi = true;
+      continue;
+    }
+
+    if (current === '--smoke') {
+      smoke = true;
       continue;
     }
 
@@ -64,11 +151,13 @@ function parseArgs(argv: string[]): CliArgs {
     process.exit(1);
   }
 
-  return { projectId, message };
+  return { projectId, message, rawLogFile: rawLogFile || undefined, realAi, smoke };
 }
 
 function printUsage() {
-  console.error('用法：npx tsx scripts/debug/simWecom.ts --project [projectId] --msg "@助手 ..."');
+  process.stderr.write(
+    '用法：npx tsx scripts/debug/simWecom.ts --project [projectId] --msg "@助手 ..." [--raw-log-file /tmp/raw.json] [--real-ai] [--smoke]\n'
+  );
 }
 
 function stripBotMention(message: string): string {
@@ -127,7 +216,7 @@ function buildProject(projectId: string): SelectProject {
     name: `Debug Project ${projectId}`,
     type: 'custom',
     status: 'active',
-    pmId: 'debug-pm',
+    pmId: 'debug-user-pm',
     wecomGroupId: `debug-group:${projectId}`,
     wecomBotWebhook: `debug-wecom:${projectId}`,
     wecomMgmtGroupId: `debug-mgmt:${projectId}`,
@@ -140,10 +229,27 @@ function buildProject(projectId: string): SelectProject {
     githubRepo: 'fightkimi/PMtool',
     budget: { total: 100000, spent: 12000, token_budget: 5000 },
     startedAt: now,
-    dueAt: new Date(now.getTime() + 1000 * 60 * 60 * 24 * 30),
+    dueAt: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
     createdAt: now,
     updatedAt: now
   };
+}
+
+function buildDebugUsers(): SelectUser[] {
+  const now = new Date();
+
+  return DEBUG_USERS.map((user) => ({
+    id: user.id,
+    workspaceId: 'debug-workspace',
+    name: user.name,
+    email: `${user.id}@example.com`,
+    role: user.role,
+    imUserId: user.imUserId,
+    workHoursPerWeek: String(user.workHoursPerWeek),
+    skills: [user.department],
+    createdAt: now,
+    updatedAt: now
+  }));
 }
 
 function createTaskTitle(content: string, fallback: string): string {
@@ -182,8 +288,8 @@ function generateTaskAnalysis(content: string): AIResponse {
       tasks,
       review_notes: []
     }),
-    inputTokens: 0,
-    outputTokens: 0
+    inputTokens: 423,
+    outputTokens: 187
   };
 }
 
@@ -204,22 +310,51 @@ function generatePipelineAnalysis(content: string): AIResponse {
       ],
       review_notes: []
     }),
-    inputTokens: 0,
-    outputTokens: 0
+    inputTokens: 401,
+    outputTokens: 143
+  };
+}
+
+function generateChangeRequestEvaluation(content: string): AIResponse {
+  const cleaned = stripBotMention(content).trim();
+  let title = cleaned;
+  let description = cleaned;
+
+  try {
+    const parsed = JSON.parse(cleaned) as { title?: string; description?: string };
+    title = parsed.title?.trim() || title;
+    description = parsed.description?.trim() || description;
+  } catch {
+    // Plain-text debug input is valid too.
+  }
+
+  return {
+    content: JSON.stringify({
+      affected_summary: `${title || description || '当前需求'} 预计影响任务拆解和排期评审`,
+      days_impact: 3,
+      risks: ['测试窗口被压缩', '交付节奏需要重新确认'],
+      affected_task_ids: []
+    }),
+    inputTokens: 196,
+    outputTokens: 92
+  };
+}
+
+function generateReviewResult(): AIResponse {
+  return {
+    content: JSON.stringify({
+      approved: true,
+      issues: [],
+      suggestions: []
+    }),
+    inputTokens: 154,
+    outputTokens: 61
   };
 }
 
 function detectIntentFromText(text: string): IntentType {
   const parsed = normalizeIntentPayload(text);
   return parsed.intent === 'unknown' && /需求|功能|文档/u.test(text) ? 'parse_requirement' : parsed.intent;
-}
-
-function formatPayload(payload: Record<string, string>) {
-  return inspect(payload, {
-    depth: null,
-    compact: true,
-    breakLength: Infinity
-  });
 }
 
 function findLastUserMessage(messages: AIMessage[]): string {
@@ -233,35 +368,239 @@ function findLastUserMessage(messages: AIMessage[]): string {
   return '';
 }
 
+function parseStructuredLog(args: unknown[]): StructuredLogEntry | null {
+  if (args.length !== 1 || typeof args[0] !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(args[0]) as StructuredLogEntry;
+    if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string' && typeof parsed.ts === 'string') {
+      return parsed;
+    }
+  } catch {
+    // Ignore non-JSON lines so the script can keep a small, clean log buffer.
+  }
+
+  return null;
+}
+
+function toOffsetLabel(baseTime: number, currentTs: string): string {
+  const diffMs = Math.max(0, new Date(currentTs).getTime() - baseTime);
+  const minutes = String(Math.floor(diffMs / 60_000)).padStart(2, '0');
+  const seconds = String(Math.floor((diffMs % 60_000) / 1000)).padStart(2, '0');
+  const millis = String(diffMs % 1000).padStart(3, '0');
+  return `${minutes}:${seconds}.${millis}`;
+}
+
+function stringifyPreview(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function formatBlock(label: string, value: unknown): string[] {
+  const serialized = stringifyPreview(value).split('\n');
+  return [`${label}:`, ...serialized.map((line) => `  ${line}`)];
+}
+
+function buildEntryLines(entry: StructuredLogEntry | ResultLog): string[] {
+  switch (entry.type) {
+    case 'INTENT':
+      return [
+        String((entry as StructuredLogEntry & { intent?: unknown }).intent ?? ''),
+        ...formatBlock('params', (entry as StructuredLogEntry & { params?: unknown }).params ?? {})
+      ];
+    case 'AGENT_START':
+      return [
+        `${String((entry as StructuredLogEntry & { from?: unknown }).from ?? '')} → ${String((entry as StructuredLogEntry & { to?: unknown }).to ?? '')}`,
+        ...formatBlock('payload', (entry as StructuredLogEntry & { payload?: unknown }).payload ?? null)
+      ];
+    case 'AGENT_END': {
+      const agentEntry = entry as StructuredLogEntry & {
+        agentType?: string;
+        status?: 'success' | 'failed';
+        result?: unknown;
+        error?: string;
+      };
+      return [
+        `${agentEntry.agentType ?? 'unknown'} ${agentEntry.status === 'success' ? '✅ success' : '❌ failed'}`,
+        ...(agentEntry.status === 'success'
+          ? formatBlock('result', agentEntry.result ?? null)
+          : [`error: ${agentEntry.error ?? 'unknown'}`])
+      ];
+    }
+    case 'AI_CALL': {
+      const aiEntry = entry as StructuredLogEntry & {
+        agentType?: string;
+        model?: string;
+        promptPreview?: string;
+        tokensIn?: number;
+        tokensOut?: number;
+        mocked?: boolean;
+      };
+      return [
+        `${aiEntry.agentType ?? 'unknown'} [${aiEntry.model ?? 'unknown'}] ${aiEntry.mocked ? '(Mock)' : '(真实调用)'}`,
+        `prompt: ${JSON.stringify(aiEntry.promptPreview ?? '')}`,
+        `tokens: ${aiEntry.tokensIn ?? 0} in / ${aiEntry.tokensOut ?? 0} out`
+      ];
+    }
+    case 'DB_WRITE': {
+      const dbEntry = entry as StructuredLogEntry & {
+        table?: string;
+        operation?: string;
+        recordCount?: number;
+        preview?: unknown;
+      };
+      return [
+        `${dbEntry.table ?? 'unknown'} ${dbEntry.operation ?? 'insert'} x${dbEntry.recordCount ?? 0}`,
+        ...formatBlock('preview', dbEntry.preview ?? null)
+      ];
+    }
+    case 'WECOM_OUT': {
+      const wecomEntry = entry as StructuredLogEntry & {
+        groupId?: string;
+        messageType?: string;
+        preview?: string;
+      };
+      return [
+        `${wecomEntry.messageType ?? 'unknown'} → ${wecomEntry.groupId ?? 'unknown'}`,
+        `preview: ${JSON.stringify(wecomEntry.preview ?? '')}`
+      ];
+    }
+    case 'ERROR': {
+      const errorEntry = entry as StructuredLogEntry & {
+        agentType?: string;
+        stage?: string;
+        error?: string;
+      };
+      return [
+        `${errorEntry.agentType ?? 'unknown'} @ ${errorEntry.stage ?? 'unknown'}`,
+        `error: ${errorEntry.error ?? 'unknown'}`
+      ];
+    }
+    case 'RESULT':
+      return [(entry as ResultLog).summary];
+    default:
+      return [stringifyPreview(entry)];
+  }
+}
+
+function getSortedLogs(logs: Array<StructuredLogEntry | ResultLog>): Array<StructuredLogEntry | ResultLog> {
+  return [...logs]
+    .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime())
+    .filter((entry, index, items) => {
+      if (index === 0 || entry.type !== 'AI_CALL') {
+        return true;
+      }
+
+      const previous = items[index - 1];
+      if (!previous || previous.type !== 'AI_CALL') {
+        return true;
+      }
+
+      return JSON.stringify(previous) !== JSON.stringify(entry);
+    });
+}
+
+function applyAiModeToLogs(logs: Array<StructuredLogEntry | ResultLog>, mocked: boolean): Array<StructuredLogEntry | ResultLog> {
+  return logs.map((entry) => {
+    if (entry.type !== 'AI_CALL') {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      mocked
+    } as StructuredLogEntry;
+  });
+}
+
+async function writeRawLogFile(path: string, logs: Array<StructuredLogEntry | ResultLog>) {
+  const targetPath = resolve(process.cwd(), path);
+  const parentDir = dirname(targetPath);
+  await mkdir(parentDir, { recursive: true });
+  await writeFile(targetPath, `${JSON.stringify(logs, null, 2)}\n`, 'utf8');
+}
+
+function renderStructuredLogs(logs: Array<StructuredLogEntry | ResultLog>, originalLog: (...args: unknown[]) => void) {
+  if (logs.length === 0) {
+    originalLog('没有采集到结构化日志。');
+    return;
+  }
+
+  const sorted = getSortedLogs(logs);
+  const baseTime = new Date(sorted[0]!.ts).getTime();
+
+  sorted.forEach((entry, index) => {
+    const lines = buildEntryLines(entry);
+    const branch = index === 0 ? '┌─' : index === sorted.length - 1 ? '└─' : '├─';
+    const offset = toOffsetLabel(baseTime, entry.ts);
+    const typeLabel = String(entry.type).padEnd(11, ' ');
+    originalLog(`${branch} ${offset}  ${typeLabel} ${lines[0] ?? ''}`);
+    lines.slice(1).forEach((line) => {
+      originalLog(`│   ${line}`);
+    });
+  });
+
+  originalLog('===== RAW LOG (复制以下内容用于排查) =====');
+  originalLog(JSON.stringify(sorted));
+  originalLog('==========================================');
+}
+
 async function main() {
-  const { projectId, message } = parseArgs(process.argv.slice(2));
+  const { projectId, message, rawLogFile, realAi, smoke } = parseArgs(process.argv.slice(2));
+  const originalConsoleLog = console.log.bind(console);
+  const capturedLogs: Array<StructuredLogEntry | ResultLog> = [];
+
+  console.log = (...args: unknown[]) => {
+    const parsedLog = parseStructuredLog(args);
+    if (parsedLog) {
+      capturedLogs.push(parsedLog);
+      return;
+    }
+
+    originalConsoleLog(...args);
+  };
+
+  const configuredRealModel = process.env.DEFAULT_AI_MODEL ?? (process.env.MINIMAX_API_KEY ? 'minimax' : 'claude');
+  const resolvedRealModel = resolveModel(configuredRealModel);
+  const realAiProviderName = resolvedRealModel?.provider.name ?? 'claude';
+  console.log(
+    realAi
+      ? `[MODE] 使用真实 ${
+          realAiProviderName === 'minimax'
+            ? 'MiniMax'
+            : realAiProviderName === 'zhipu'
+              ? '智谱'
+              : realAiProviderName === 'deepseek'
+                ? 'DeepSeek'
+                : 'Claude'
+        } API，响应时间约 2-5 秒`
+      : '[MODE] 使用 Mock AI（调试模式，响应瞬时）'
+  );
+
   const project = buildProject(projectId);
   const incoming = buildIncomingMessage(projectId, message);
   const parsed = normalizeIntentPayload(incoming.text ?? '');
   const memory: MemoryState = {
     jobs: [],
     tasks: [],
-    wecomLogs: [],
-    runs: []
+    runs: [],
+    changeRequests: [],
+    users: buildDebugUsers()
   };
 
   const imAdapter: IMAdapter = {
     async sendMessage(groupId: string, text: string) {
-      memory.wecomLogs.push(`[WECOM 群消息] ${groupId}: ${text}`);
+      agentLogger.wecom(groupId, 'markdown', text);
     },
     async sendMarkdown(groupId: string, markdown: string) {
-      memory.wecomLogs.push(`[WECOM 群消息] ${groupId}: ${markdown}`);
+      agentLogger.wecom(groupId, 'markdown', markdown);
     },
     async sendCard(groupId: string, card: IMCard) {
-      memory.wecomLogs.push(`[WECOM 群卡片] ${groupId}: 标题：${card.title} 内容：${card.content}`);
+      agentLogger.wecom(groupId, 'card', JSON.stringify(card));
     },
     async sendDM(userId: string, content: IMMessage) {
-      if (content.type === 'text') {
-        memory.wecomLogs.push(`[WECOM 私聊] ${userId}: ${content.text}`);
-        return;
-      }
-
-      memory.wecomLogs.push(`[WECOM 私聊卡片] ${userId}: 标题：${content.card.title} 内容：${content.card.content}`);
+      agentLogger.wecom(userId, 'dm', JSON.stringify(content));
     },
     async parseIncoming() {
       return incoming;
@@ -271,42 +610,106 @@ async function main() {
     }
   };
 
-  const aiAdapter: AIAdapter = {
-    async chat(messages: AIMessage[], options: AIOptions): Promise<AIResponse> {
-      const systemPrompt = messages.find((item) => item.role === 'system')?.content ?? '';
-      const userMessage = findLastUserMessage(messages);
+  let aiAdapter: AIAdapter;
+  if (realAi) {
+    const defaultRealModel = process.env.DEFAULT_AI_MODEL ?? (process.env.MINIMAX_API_KEY ? 'minimax' : 'claude');
+    const resolved = resolveModel(defaultRealModel);
+    const hasClaude = Boolean(process.env.ANTHROPIC_API_KEY);
+    const hasMiniMax = Boolean(process.env.MINIMAX_API_KEY);
+    const hasDeepSeek = Boolean(process.env.DEEPSEEK_API_KEY);
+    const hasZhipu = Boolean(process.env.ZHIPU_API_KEY);
 
-      if (systemPrompt.includes('项目管理意图')) {
-        const intent = detectIntentFromText(userMessage);
-        options.onUsage?.({
-          model: 'debug-mock',
-          inputTokens: 0,
-          outputTokens: 0,
-          costUsd: 0
-        });
-        return {
-          content: intent,
-          inputTokens: 0,
-          outputTokens: 0
-        };
-      }
-
-      const response = /皮肤|角色|关卡|UI改版|美术|建模|贴图|原画/u.test(userMessage)
-        ? generatePipelineAnalysis(userMessage)
-        : generateTaskAnalysis(userMessage);
-      options.onUsage?.({
-        model: 'debug-mock',
-        inputTokens: 0,
-        outputTokens: 0,
-        costUsd: 0
-      });
-      return response;
-    },
-    async *stream() {
-      yield 'debug';
-      yield 'stream';
+    if (!resolved) {
+      throw new Error(`未知的真实模型：${defaultRealModel}。可用模型别名：${getAllAliases().join(', ')}`);
     }
-  };
+
+    if (resolved.provider.name === 'minimax' && !hasMiniMax) {
+      throw new Error('缺少 MINIMAX_API_KEY，无法启用 --real-ai 模式');
+    }
+
+    if (resolved.provider.name === 'claude' && !hasClaude) {
+      throw new Error('缺少 ANTHROPIC_API_KEY，无法启用 --real-ai 模式');
+    }
+
+    if (resolved.provider.name === 'deepseek' && !hasDeepSeek) {
+      throw new Error('缺少 DEEPSEEK_API_KEY，无法启用 --real-ai 模式');
+    }
+
+    if (resolved.provider.name === 'zhipu' && !hasZhipu) {
+      throw new Error('缺少 ZHIPU_API_KEY，无法启用 --real-ai 模式');
+    }
+
+    if (!hasClaude && !hasMiniMax && !hasDeepSeek && !hasZhipu) {
+      throw new Error('缺少可用的真实 AI Key，无法启用 --real-ai 模式');
+    }
+
+    aiAdapter = new AIModelAdapter({
+      anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+      deepseekApiKey: process.env.DEEPSEEK_API_KEY,
+      minimaxApiKey: process.env.MINIMAX_API_KEY,
+      minimaxModel: process.env.MINIMAX_MODEL
+    });
+  } else {
+    aiAdapter = {
+      async chat(messages: AIMessage[], options: AIOptions): Promise<AIResponse> {
+        const systemPrompt = messages.find((item) => item.role === 'system')?.content ?? '';
+        const userMessage = findLastUserMessage(messages);
+
+        if (systemPrompt.includes('项目管理意图')) {
+          const intent = detectIntentFromText(userMessage);
+          agentLogger.aiCall('zhongshui', options.model ?? 'claude-sonnet-4-6', systemPrompt, 0, 0, true);
+          return {
+            content: intent,
+            inputTokens: 0,
+            outputTokens: 0
+          };
+        }
+
+        if (systemPrompt.includes('分析以下需求变更对现有任务和排期的影响')) {
+          const response = generateChangeRequestEvaluation(userMessage);
+          agentLogger.aiCall(
+            'menxia',
+            options.model ?? 'claude-sonnet-4-6',
+            systemPrompt,
+            response.inputTokens,
+            response.outputTokens,
+            true
+          );
+          return response;
+        }
+
+        if (systemPrompt.includes('你是项目风险审查专家')) {
+          const response = generateReviewResult();
+          agentLogger.aiCall(
+            'menxia',
+            options.model ?? 'claude-sonnet-4-6',
+            systemPrompt,
+            response.inputTokens,
+            response.outputTokens,
+            true
+          );
+          return response;
+        }
+
+        const response = /皮肤|角色|关卡|UI改版|美术|建模|贴图|原画/u.test(userMessage)
+          ? generatePipelineAnalysis(userMessage)
+          : generateTaskAnalysis(userMessage);
+        agentLogger.aiCall(
+          'zhongshu',
+          options.model ?? 'claude-sonnet-4-6',
+          systemPrompt,
+          response.inputTokens,
+          response.outputTokens,
+          true
+        );
+        return response;
+      },
+      async *stream() {
+        yield 'debug';
+        yield 'stream';
+      }
+    };
+  }
 
   const adapterRegistry = {
     getIM: () => imAdapter,
@@ -383,17 +786,11 @@ async function main() {
       assigneeId: task.assigneeId ?? null,
       reviewerId: task.reviewerId ?? null,
       department: task.department ?? null,
-      estimatedHours:
-        task.estimatedHours == null
-          ? null
-          : typeof task.estimatedHours === 'string'
-            ? task.estimatedHours
-            : String(task.estimatedHours),
-      actualHours:
-        task.actualHours == null ? null : typeof task.actualHours === 'string' ? task.actualHours : String(task.actualHours),
+      estimatedHours: task.estimatedHours == null ? null : Number(task.estimatedHours),
+      actualHours: task.actualHours == null ? null : Number(task.actualHours),
       earliestStart: task.earliestStart ?? null,
       latestFinish: task.latestFinish ?? null,
-      floatDays: task.floatDays == null ? null : typeof task.floatDays === 'string' ? task.floatDays : String(task.floatDays),
+      floatDays: task.floatDays == null ? null : Number(task.floatDays),
       githubIssueNumber: task.githubIssueNumber ?? null,
       acceptanceCriteria: task.acceptanceCriteria ?? [],
       tableRecordId: task.tableRecordId ?? null,
@@ -435,31 +832,115 @@ async function main() {
     updatedAt: new Date()
   });
 
+  const createChangeRequest = (rawText: string): SelectChangeRequest => {
+    const now = new Date();
+    const changeRequest: SelectChangeRequest = {
+      id: randomUUID(),
+      projectId,
+      source: 'requirement',
+      title: rawText.slice(0, 40) || '调试变更请求',
+      description: rawText,
+      requestedBy: null,
+      status: 'draft',
+      affectedTaskIds: [],
+      affectedRunIds: [],
+      scheduleImpactDays: 0,
+      evaluationByAgent: null,
+      cascadeExecutedAt: null,
+      createdAt: now,
+      updatedAt: now
+    };
+    memory.changeRequests.push(changeRequest);
+    return changeRequest;
+  };
+
+  const updateChangeRequest = async (id: string, patch: Partial<InsertChangeRequest>): Promise<void> => {
+    const changeRequest = memory.changeRequests.find((item) => item.id === id);
+    if (!changeRequest) {
+      return;
+    }
+
+    if (patch.affectedTaskIds !== undefined) {
+      changeRequest.affectedTaskIds = patch.affectedTaskIds ?? [];
+    }
+    if (patch.affectedRunIds !== undefined) {
+      changeRequest.affectedRunIds = patch.affectedRunIds ?? [];
+    }
+    if (patch.scheduleImpactDays !== undefined) {
+      changeRequest.scheduleImpactDays = patch.scheduleImpactDays ?? 0;
+    }
+    if (patch.evaluationByAgent !== undefined) {
+      changeRequest.evaluationByAgent = patch.evaluationByAgent ?? null;
+    }
+    if (patch.status !== undefined) {
+      changeRequest.status = patch.status;
+    }
+    if (patch.cascadeExecutedAt !== undefined) {
+      changeRequest.cascadeExecutedAt = patch.cascadeExecutedAt ?? null;
+    }
+    changeRequest.updatedAt = new Date();
+  };
+
+  const getOriginalContent = async (jobId: string, traceIds: string[] = []): Promise<string> => {
+    const candidateJobIds = [jobId, ...traceIds];
+    const originalJob = memory.jobs
+      .filter((job) => candidateJobIds.includes(job.id) && job.agentType === 'zhongshu')
+      .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime())
+      .find((job) => {
+        const payload = (job.input as { payload?: { content?: unknown; original_content?: unknown } }).payload;
+        return typeof payload?.content === 'string' || typeof payload?.original_content === 'string';
+      });
+
+    const payload = (originalJob?.input as { payload?: { content?: unknown; original_content?: unknown } } | undefined)?.payload;
+    if (typeof payload?.content === 'string' && payload.content.trim()) {
+      return payload.content;
+    }
+
+    if (typeof payload?.original_content === 'string' && payload.original_content.trim()) {
+      return payload.original_content;
+    }
+
+    return '（原始需求内容不可用，请根据 veto 反馈直接改进）';
+  };
+
   let zhongShuAgent: ZhongShuAgent | null = null;
+  let menXiaAgent: MenXiaAgent | null = null;
+  let shangShuAgent: ShangShuAgent | null = null;
 
   const queue = {
     async enqueue(outbound: AgentMessage): Promise<string> {
-      console.log(`[AGENT] ${outbound.from} → ${outbound.to}`);
-
       if (outbound.to === 'zhongshu' && zhongShuAgent) {
-        const beforeTaskCount = memory.tasks.length;
-        const beforeRunCount = memory.runs.length;
-        const result = await zhongShuAgent.run(outbound);
+        await zhongShuAgent.run(outbound);
+      }
 
-        const createdTaskCount = memory.tasks.length - beforeTaskCount;
-        const createdRunCount = memory.runs.length - beforeRunCount;
-        if (createdTaskCount > 0) {
-          console.log(`[AGENT] zhongshu: 解析出 ${createdTaskCount} 个任务`);
-        } else if (createdRunCount > 0) {
-          console.log(`[AGENT] zhongshu: 实例化 ${createdRunCount} 条管线`);
-        } else {
-          console.log(`[AGENT] zhongshu: 已完成处理`);
+      if (outbound.to === 'menxia' && menXiaAgent) {
+        if (smoke) {
+          return outbound.id;
         }
 
-        const downstream = result.payload as Record<string, unknown>;
-        if (Array.isArray(downstream.review_notes) && downstream.review_notes.length > 0) {
-          console.log(`[AGENT] zhongshu review_notes: ${inspect(downstream.review_notes, { compact: true, breakLength: Infinity })}`);
+        const menxiaPayload = { ...(outbound.payload as Record<string, unknown>) };
+
+        if (
+          menxiaPayload.type === 'change_request' &&
+          typeof menxiaPayload.description === 'string' &&
+          !('change_request_id' in menxiaPayload)
+        ) {
+          const changeRequest = createChangeRequest(menxiaPayload.description);
+          menxiaPayload.change_request_id = changeRequest.id;
         }
+
+        await menXiaAgent.run({
+          ...outbound,
+          payload: menxiaPayload
+        });
+      }
+
+      if (outbound.to === 'shangshu' && shangShuAgent) {
+        if (smoke) {
+          return outbound.id;
+        }
+
+        await shangShuAgent.run(outbound);
       }
 
       return outbound.id;
@@ -472,8 +953,9 @@ async function main() {
     createAgentJob,
     updateAgentJob,
     getProjectById: async () => project,
-    getPMIMUserId: async () => 'debug-pm-im',
+    getPMIMUserId: async () => 'debug-im-pm',
     batchInsertTasks,
+    getOriginalContent,
     tableSync: {
       async batchSyncTasksToTable() {
         return;
@@ -501,13 +983,83 @@ async function main() {
     }
   });
 
+  menXiaAgent = new MenXiaAgent({
+    registry: adapterRegistry,
+    queue,
+    createAgentJob,
+    updateAgentJob,
+    getProjectById: async () => project,
+    getPMIMUserId: async () => 'debug-pm-im',
+    getChangeRequestById: async (id) => memory.changeRequests.find((item) => item.id === id) ?? null,
+    updateChangeRequest,
+    getTasksByIds: async (ids) => memory.tasks.filter((item) => ids.includes(item.id)),
+    getStagesByIds: async () => [],
+    getStagesByRunIds: async () => [],
+    vetoStore: {
+      async get() {
+        return '0';
+      },
+      async set() {
+        return 'OK';
+      }
+    },
+    getWorkspaceMemberCount: async () => 5
+  });
+
+  shangShuAgent = new ShangShuAgent({
+    registry: adapterRegistry,
+    createAgentJob,
+    updateAgentJob,
+    getProjectById: async () => project,
+    getPMIMUserId: async () => 'debug-im-pm',
+    getTasksByIds: async (ids) => memory.tasks.filter((item) => ids.includes(item.id)),
+    getStagesByIds: async () => [],
+    getStagesByRunIds: async () => [],
+    getTasksByAffectedIds: async (ids) => memory.tasks.filter((item) => ids.includes(item.id)),
+    getCandidatesForDepartment: async (workspaceId, departmentOrRole) => {
+      const matchingDebugUsers = DEBUG_USERS.filter((user) => user.department === departmentOrRole);
+      const fallbackDebugUsers =
+        matchingDebugUsers.length > 0 ? matchingDebugUsers : DEBUG_USERS.filter((user) => user.role === 'manager');
+
+      return fallbackDebugUsers
+        .map((debugUser) => memory.users.find((user) => user.id === debugUser.id))
+        .filter((user): user is SelectUser => user != null && user.workspaceId === workspaceId)
+        .map((user, index) => ({ ...user, loadScore: index }));
+    },
+    getUserById: async (id) => memory.users.find((item) => item.id === id) ?? null,
+    updateTask: async (id, patch) => {
+      const task = memory.tasks.find((item) => item.id === id);
+      if (!task) {
+        return;
+      }
+
+      if (patch.assigneeId !== undefined) {
+        task.assigneeId = patch.assigneeId ?? null;
+      }
+      if (patch.dueAt !== undefined) {
+        task.dueAt = patch.dueAt ?? null;
+      }
+      if (patch.status !== undefined) {
+        task.status = patch.status;
+      }
+      if (patch.completedAt !== undefined) {
+        task.completedAt = patch.completedAt ?? null;
+      }
+      task.updatedAt = new Date();
+    },
+    batchUpdateStages: async () => undefined,
+    updateChangeRequest,
+    syncPipelineTable: async () => undefined,
+    syncTasksTable: async () => undefined
+  });
+
   const zhongshuiAgent = new ZhongshuiAgent({
     registry: adapterRegistry,
     queue,
     createAgentJob,
     updateAgentJob,
     getProjectById: async () => project,
-    getPMIMUserId: async () => 'debug-pm-im'
+    getPMIMUserId: async () => 'debug-im-pm'
   });
 
   const initialMessage: AgentMessage = {
@@ -530,33 +1082,45 @@ async function main() {
     created_at: new Date().toISOString()
   };
 
-  console.log(`[INTENT] ${parsed.intent} ${formatPayload(parsed.params)}`);
+  agentLogger.intent(parsed.intent, parsed.params);
 
   try {
-    const result = await zhongshuiAgent.run(initialMessage);
-
-    for (const line of memory.wecomLogs) {
-      console.log(line);
-    }
-
-    for (const job of memory.jobs) {
-      const errorSuffix = job.errorMessage ? ` error=${job.errorMessage}` : '';
-      console.log(`[JOB] ${job.agentType} ${job.status}${errorSuffix}`);
-    }
-
-    if (result.to !== 'zhongshu' && result.to !== 'menxia') {
-      console.log(`[AGENT] ${result.to}: 已接收请求`);
-    }
-
-    console.log('[RESULT] 成功');
+    await zhongshuiAgent.run(initialMessage);
+    const uniqueAgents = new Set(
+      capturedLogs
+        .filter((entry) => entry.type === 'AGENT_END')
+        .map((entry) => String((entry as StructuredLogEntry & { agentType?: unknown }).agentType ?? ''))
+        .filter(Boolean)
+    );
+    const firstTs = capturedLogs[0]?.ts ? new Date(capturedLogs[0].ts).getTime() : Date.now();
+    capturedLogs.push({
+      type: 'RESULT',
+      ts: new Date().toISOString(),
+      summary: `全链路成功，共 ${uniqueAgents.size} 个 Agent，耗时 ${((Date.now() - firstTs) / 1000).toFixed(1)}s`
+    });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
-    for (const job of memory.jobs) {
-      const errorSuffix = job.errorMessage ? ` error=${job.errorMessage}` : '';
-      console.log(`[JOB] ${job.agentType} ${job.status}${errorSuffix}`);
-    }
-    console.error(`[RESULT] 失败 ${err.message}`);
+    agentLogger.error('simWecom', 'main', err.message);
+    capturedLogs.push({
+      type: 'RESULT',
+      ts: new Date().toISOString(),
+      summary: `全链路失败，错误: ${err.message}`
+    });
     process.exitCode = 1;
+  } finally {
+    console.log = originalConsoleLog;
+    const normalizedLogs = applyAiModeToLogs(capturedLogs, !realAi);
+    renderStructuredLogs(normalizedLogs, originalConsoleLog);
+    if (rawLogFile) {
+      try {
+        await writeRawLogFile(rawLogFile, getSortedLogs(normalizedLogs));
+        originalConsoleLog(`[RAW LOG FILE] ${resolve(process.cwd(), rawLogFile)}`);
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        originalConsoleLog(`[RAW LOG FILE ERROR] ${err.message}`);
+        process.exitCode = 1;
+      }
+    }
   }
 }
 

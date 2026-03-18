@@ -38,7 +38,7 @@ const relatedTasks: SelectTask[] = [
     assigneeId: null,
     reviewerId: null,
     department: 'libu_gong',
-    estimatedHours: '8',
+    estimatedHours: 8,
     actualHours: null,
     earliestStart: null,
     latestFinish: null,

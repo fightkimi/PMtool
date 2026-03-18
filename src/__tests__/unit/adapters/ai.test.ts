@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AIModelAdapter, selectModel } from '@/adapters/ai/AIModelAdapter';
 import type { AnthropicMessageClient } from '@/adapters/types';
 
-function jsonResponse(data: unknown): Response {
+function jsonResponse(data: unknown, init?: ResponseInit): Response {
   return new Response(JSON.stringify(data), {
-    headers: { 'Content-Type': 'application/json' }
+    headers: { 'Content-Type': 'application/json' },
+    ...init
   });
 }
 
@@ -25,6 +26,16 @@ function sseResponse(chunks: string[]): Response {
 }
 
 describe('AIModelAdapter', () => {
+  afterEach(() => {
+    delete process.env.DEFAULT_AI_MODEL;
+    delete process.env.ZHIPU_API_KEY;
+    delete process.env.DEEPSEEK_API_KEY;
+    delete process.env.MINIMAX_API_KEY;
+    delete process.env.MINIMAX_API_BASE;
+    delete process.env.ZHONGSHU_MODEL;
+    delete process.env.AI_REQUEST_TIMEOUT_MS;
+  });
+
   it('chat uses Anthropic SDK for claude', async () => {
     const create = vi.fn().mockResolvedValue({
       content: [{ text: 'hello from claude' }],
@@ -38,7 +49,7 @@ describe('AIModelAdapter', () => {
       anthropicClient
     });
 
-    await adapter.chat([{ role: 'user', content: 'hello' }], {});
+    await adapter.chat([{ role: 'user', content: 'hello' }], { model: 'claude' });
 
     expect(create).toHaveBeenCalledTimes(1);
     expect(create.mock.calls[0]?.[0]).toMatchObject({
@@ -46,75 +57,112 @@ describe('AIModelAdapter', () => {
     });
   });
 
-  it('chat uses deepseek compatible endpoint', async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        jsonResponse({
-          choices: [{ message: { content: 'hello from deepseek' } }],
-          usage: { prompt_tokens: 200, completion_tokens: 100 }
-        })
-      );
+  it('chat uses provider config for deepseek', async () => {
+    process.env.DEEPSEEK_API_KEY = 'ds-key';
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        choices: [{ message: { content: 'hello from deepseek' } }],
+        usage: { prompt_tokens: 200, completion_tokens: 100 }
+      })
+    );
     const adapter = new AIModelAdapter({
-      deepseekApiKey: 'ds-key',
       fetcher
     });
 
     await adapter.chat([{ role: 'user', content: 'hello' }], { model: 'deepseek' });
 
     expect(String(fetcher.mock.calls[0]?.[0])).toContain('deepseek');
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({
+      method: 'POST'
+    });
   });
 
-  it('onUsage reports claude and deepseek costs correctly', async () => {
-    const usageSpy = vi.fn();
-    const anthropicClient: AnthropicMessageClient = {
-      messages: {
-        create: vi.fn().mockResolvedValue({
-          content: [{ text: 'claude' }],
-          usage: { input_tokens: 1000, output_tokens: 500 }
-        })
-      }
-    };
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        jsonResponse({
-          choices: [{ message: { content: 'deepseek' } }],
-          usage: { prompt_tokens: 1000, completion_tokens: 500 }
-        })
-      );
+  it('chat uses minimax provider config and strips think blocks', async () => {
+    process.env.MINIMAX_API_KEY = 'minimax-key';
+    process.env.MINIMAX_API_BASE = 'https://api.minimaxi.com/v1';
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        choices: [{ message: { content: '<think>内部推理</think>\n测试回复' } }],
+        usage: { prompt_tokens: 10, completion_tokens: 20 },
+        base_resp: { status_code: 0 }
+      })
+    );
+    const onUsage = vi.fn();
     const adapter = new AIModelAdapter({
-      anthropicApiKey: 'ant-key',
-      anthropicClient,
-      deepseekApiKey: 'ds-key',
       fetcher
     });
 
-    await adapter.chat([{ role: 'user', content: 'hi' }], { onUsage: usageSpy });
-    await adapter.chat([{ role: 'user', content: 'hi' }], { model: 'deepseek', onUsage: usageSpy });
+    const result = await adapter.chat([{ role: 'user', content: 'hello minimax' }], {
+      model: 'minimax',
+      onUsage
+    });
 
-    expect(usageSpy).toHaveBeenNthCalledWith(
-      1,
+    expect(String(fetcher.mock.calls[0]?.[0])).toContain('minimaxi.com');
+    expect(result.content).toBe('测试回复');
+    expect(onUsage).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: 'claude',
-        costUsd: (1000 * 3 + 500 * 15) / 1_000_000
-      })
-    );
-    expect(usageSpy).toHaveBeenNthCalledWith(
-      2,
-      expect.objectContaining({
-        model: 'deepseek',
-        costUsd: (1000 * 0.14 + 500 * 0.28) / 1_000_000
+        model: 'MiniMax-M2.5',
+        inputTokens: 10,
+        outputTokens: 20
       })
     );
   });
 
-  it('selectModel returns expected provider', () => {
-    expect(selectModel('zhongshu')).toBe('claude');
-    expect(selectModel('libu_li2')).toBe('deepseek');
+  it('throws when openai-compatible provider key is missing', async () => {
+    const adapter = new AIModelAdapter({
+      fetcher: vi.fn()
+    });
+
+    await expect(adapter.chat([{ role: 'user', content: 'hello zhipu' }], { model: 'glm' })).rejects.toThrow(
+      'ZHIPU_API_KEY'
+    );
   });
 
-  it('stream yields multiple chunks', async () => {
+  it('throws when minimax returns api error', async () => {
+    process.env.MINIMAX_API_KEY = 'minimax-key';
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        base_resp: { status_code: 1002, status_msg: 'Invalid API Key' }
+      })
+    );
+    const adapter = new AIModelAdapter({
+      fetcher
+    });
+
+    await expect(adapter.chat([{ role: 'user', content: 'hello minimax' }], { model: 'minimax' })).rejects.toThrow(
+      'Invalid API Key'
+    );
+  });
+
+  it('chat throws helpful error for unknown alias', async () => {
+    const adapter = new AIModelAdapter({
+      fetcher: vi.fn()
+    });
+
+    await expect(adapter.chat([{ role: 'user', content: 'hello' }], { model: 'unknown-model' })).rejects.toThrow(
+      '未知的模型：unknown-model'
+    );
+
+    try {
+      await adapter.chat([{ role: 'user', content: 'hello' }], { model: 'unknown-model' });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      expect(message).toContain('claude');
+      expect(message).toContain('glm-flash');
+      expect(message).toContain('minimax');
+    }
+  });
+
+  it('selectModel prefers agent specific env and falls back to default', () => {
+    process.env.ZHONGSHU_MODEL = 'glm-4-flash';
+    process.env.DEFAULT_AI_MODEL = 'glm';
+
+    expect(selectModel('zhongshu')).toBe('glm-4-flash');
+    expect(selectModel('menxia')).toBe('glm');
+  });
+
+  it('stream yields multiple chunks for openai-compatible provider', async () => {
+    process.env.DEEPSEEK_API_KEY = 'ds-key';
     const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
       sseResponse([
         'data: {"choices":[{"delta":{"content":"hello "}}]}\n',
@@ -123,7 +171,6 @@ describe('AIModelAdapter', () => {
       ])
     );
     const adapter = new AIModelAdapter({
-      deepseekApiKey: 'ds-key',
       fetcher
     });
 
@@ -132,7 +179,6 @@ describe('AIModelAdapter', () => {
       chunks.push(chunk);
     }
 
-    expect(chunks.length).toBeGreaterThanOrEqual(2);
-    expect(chunks.join('')).toBe('hello world');
+    expect(chunks).toEqual(['hello ', 'world']);
   });
 });

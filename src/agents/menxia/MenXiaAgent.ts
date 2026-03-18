@@ -1,10 +1,12 @@
 import Redis from 'ioredis';
 import { and, eq, inArray } from 'drizzle-orm';
+import { callAIWithRetry } from '@/agents/base/aiUtils';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import { agentQueue, type AgentQueue } from '@/agents/base/AgentQueue';
 import type { AgentMessage } from '@/agents/base/types';
 import { detectCycle } from '@/agents/zhongshu/dagUtils';
 import { db } from '@/lib/db';
+import { extractJson } from '@/lib/parseJson';
 import {
   changeRequests,
   pipelineStageInstances,
@@ -15,6 +17,7 @@ import {
   type SelectPipelineStageInstance,
   type SelectTask
 } from '@/lib/schema';
+import { agentLogger } from '@/workers/logger';
 
 type QueueLike = Pick<AgentQueue, 'enqueue'>;
 
@@ -22,6 +25,13 @@ type ReviewResult = {
   approved: boolean;
   issues: string[];
   suggestions: string[];
+};
+
+type ChangeRequestEvaluation = {
+  affected_summary: string;
+  days_impact: number;
+  risks: string[];
+  affected_task_ids?: string[];
 };
 
 type TaskWithDeps = SelectTask & { dependencies?: string[] };
@@ -44,16 +54,9 @@ type MenXiaDeps = BaseAgentDeps & {
   now?: () => Date;
 };
 
-const REVIEW_PROMPT = `你是项目风险审查专家。审查以下任务/管线计划，检查：
-1. 任务描述是否有歧义或关键信息缺失（每条描述不足 10 字视为可疑）
-2. 工期估算是否合理（单个任务 > 40h 需要说明理由，< 0.5h 可能过于乐观）
-3. 是否有明显遗漏的工种或阶段
-4. 依赖关系是否逻辑合理（循环依赖、孤岛任务）
-
-返回严格 JSON（不要其他内容）：
-{ "approved": boolean, "issues": string[], "suggestions": string[] }
-
-approved=false 时 issues 必须非空，且每条 issue 需指明具体任务名称。`;
+const REVIEW_PROMPT = `你是项目审查专家。检查任务计划的描述清晰度、工期合理性、工种完整性、依赖合理性。
+返回 JSON：{"approved":boolean,"issues":[""],"suggestions":[""]}
+只输出 JSON，不要解释。`;
 
 const CHANGE_REQUEST_PROMPT =
   '分析以下需求变更对现有任务和排期的影响，识别受影响的任务，估算排期推迟天数，返回 JSON: {affected_summary, days_impact, risks}';
@@ -70,13 +73,112 @@ function createDefaultVetoStore(): VetoStore {
   };
 }
 
-function numericValue(value: string | null | undefined): number {
+function numericValue(value: number | string | null | undefined): number {
   return value == null ? 0 : Number(value);
 }
 
 function daysBetween(start: Date, end: Date): number {
   const diff = end.getTime() - start.getTime();
   return Math.max(0, Math.ceil(diff / (24 * 60 * 60 * 1000)));
+}
+
+function normalizeStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => (typeof item === 'string' ? item.trim() : String(item ?? '').trim()))
+      .filter(Boolean);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return [value.trim()];
+  }
+
+  return [];
+}
+
+function normalizeReviewResult(value: unknown): ReviewResult {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  return {
+    approved: typeof raw.approved === 'boolean' ? raw.approved : false,
+    issues: normalizeStringArray(raw.issues),
+    suggestions: normalizeStringArray(raw.suggestions)
+  };
+}
+
+function createFallbackReviewResult(): ReviewResult {
+  return {
+    approved: false,
+    issues: ['自动审核暂时不可用，请人工复核任务描述、工时与依赖关系。'],
+    suggestions: ['补充更明确的需求背景、验收标准和依赖说明后重试。']
+  };
+}
+
+function inferRiskLevel(issues: string[]): '高风险' | '中风险' | '低风险' {
+  if (issues.length >= 4) {
+    return '高风险';
+  }
+
+  if (issues.length >= 2) {
+    return '中风险';
+  }
+
+  return '低风险';
+}
+
+function createOrderedSection(items: string[], emptyText: string, maxVisible = 3): string {
+  if (items.length === 0) {
+    return `1. ${emptyText}`;
+  }
+
+  const visible = items.slice(0, maxVisible).map((item, index) => `${index + 1}. ${item}`);
+  const remaining = items.length - maxVisible;
+
+  if (remaining > 0) {
+    visible.push(`${visible.length + 1}. 其余 ${remaining} 条请按上方方向继续补充`);
+  }
+
+  return visible.join('\n');
+}
+
+function createNextStepSection(suggestions: string[]): string {
+  const normalized = suggestions.slice(0, 2);
+  const steps = [
+    normalized[0] ?? '先补齐需求边界、覆盖范围与验收标准。',
+    normalized[1] ?? '补充工时依据、责任工种与前置依赖后重新提交。',
+    '在群里重新发送修正后的需求，系统会重新拆解并审核。'
+  ];
+
+  return steps.map((step, index) => `${index + 1}. ${step}`).join('\n');
+}
+
+function createReviewSummaryCardContent(issues: string[], suggestions: string[]): string {
+  return [
+    '审核结果：',
+    '未通过',
+    '风险等级：',
+    inferRiskLevel(issues),
+    '问题：',
+    createOrderedSection(issues, '当前未识别到明确问题，请人工复核。'),
+    '建议：',
+    createOrderedSection(suggestions, '请先补充更明确的背景、验收标准与依赖说明。'),
+    '下一步：',
+    createNextStepSection(suggestions)
+  ].join('\n\n');
+}
+
+function normalizeChangeRequestEvaluation(value: unknown): ChangeRequestEvaluation {
+  const raw = (value ?? {}) as Record<string, unknown>;
+  return {
+    affected_summary: typeof raw.affected_summary === 'string' ? raw.affected_summary : '',
+    days_impact:
+      typeof raw.days_impact === 'number'
+        ? raw.days_impact
+        : Number.parseFloat(String(raw.days_impact ?? '0')) || 0,
+    risks: normalizeStringArray(raw.risks),
+    affected_task_ids: Array.isArray(raw.affected_task_ids)
+      ? raw.affected_task_ids.map((item) => String(item)).filter(Boolean)
+      : []
+  };
 }
 
 export class MenXiaAgent extends BaseAgent {
@@ -166,21 +268,39 @@ export class MenXiaAgent extends BaseAgent {
       }));
     }
 
-    const aiReview = await this.getAIAdapter().chat(
-      [
-        { role: 'system', content: REVIEW_PROMPT },
-        {
-          role: 'user',
-          content: JSON.stringify({
-            mode: payload.mode,
-            review_notes: reviewNotes,
-            items: reviewPayload
-          })
-        }
-      ],
-      {}
-    );
-    const aiResult = JSON.parse(aiReview.content) as ReviewResult;
+    if (issues.length > 0) {
+      return this.handleFailedReview(message, projectId, issues, []);
+    }
+
+    let aiResult: ReviewResult;
+    try {
+      aiResult = normalizeReviewResult(
+        await callAIWithRetry(
+          this.getAIAdapter(),
+          [
+            { role: 'system', content: REVIEW_PROMPT },
+            {
+              role: 'user',
+              content: JSON.stringify({
+                mode: payload.mode,
+                review_notes: reviewNotes,
+                items: reviewPayload
+              })
+            }
+          ],
+          { agentType: this.agentType, temperature: 0.1, maxTokens: 220 },
+          2
+        )
+      );
+    } catch (error) {
+      agentLogger.error(this.agentType, 'review_ai', error);
+      const fallback = createFallbackReviewResult();
+      return this.handleFailedReview(message, projectId, fallback.issues, fallback.suggestions);
+    }
+
+    if (!aiResult.approved && aiResult.issues.length === 0 && aiResult.suggestions.length === 0) {
+      aiResult = createFallbackReviewResult();
+    }
 
     const allIssues = [...issues, ...aiResult.issues];
     const approved = issues.length === 0 && aiResult.approved;
@@ -218,13 +338,18 @@ export class MenXiaAgent extends BaseAgent {
         'zhongshu',
         {
           issues,
-          suggestions
+          suggestions,
+          project_id: projectId
         },
         message.context,
         2,
         'veto'
       );
       await this.queue.enqueue(outbound);
+      await this.sendCard(projectId, {
+        title: '⚠️ 计划审核未通过',
+        content: createReviewSummaryCardContent(issues, suggestions)
+      });
       return outbound;
     }
 
@@ -261,15 +386,9 @@ export class MenXiaAgent extends BaseAgent {
           })
         }
       ],
-      {}
+      { agentType: this.agentType, temperature: 0.1, maxTokens: 200 }
     );
-
-    const parsed = JSON.parse(aiResponse.content) as {
-      affected_summary: string;
-      days_impact: number;
-      risks: string[];
-      affected_task_ids?: string[];
-    };
+    const parsed = normalizeChangeRequestEvaluation(extractJson(aiResponse.content));
 
     await this.updateChangeRequestFn(changeRequestId, {
       affectedTaskIds: parsed.affected_task_ids ?? [],
@@ -277,6 +396,7 @@ export class MenXiaAgent extends BaseAgent {
       evaluationByAgent: parsed,
       status: 'evaluating'
     });
+    agentLogger.dbWrite('change_requests', 'update', 1, { schedule_impact_days: parsed.days_impact });
 
     await this.sendCard(changeRequest.projectId, {
       title: '📋 变更评估结果',

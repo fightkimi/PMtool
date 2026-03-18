@@ -61,7 +61,11 @@ function createAgent() {
     getGroupMembers: vi.fn()
   };
   const ai: AIAdapter = {
-    chat: vi.fn().mockResolvedValue({ content: 'risk_scan', inputTokens: 10, outputTokens: 5 }),
+    chat: vi.fn().mockResolvedValue({
+      content: JSON.stringify({ intent: 'risk_scan' }),
+      inputTokens: 10,
+      outputTokens: 5
+    }),
     stream: vi.fn()
   };
 
@@ -119,6 +123,34 @@ describe('ZhongshuiAgent', () => {
   it('uses AI to resolve unknown intent before enqueue', async () => {
     const { agent, enqueue, ai } = createAgent();
     await agent.handle(createMessage('unknown', { text: '帮我看看有没有风险' }));
+
+    expect(ai.chat).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ to: 'libu_bing' }));
+  });
+
+  it('rescues noisy intent json without throwing', async () => {
+    const { agent, enqueue, ai } = createAgent();
+    vi.mocked(ai.chat).mockResolvedValueOnce({
+      content: '好的：{"intent":"weekly_report"}',
+      inputTokens: 10,
+      outputTokens: 5
+    });
+
+    await agent.handle(createMessage('unknown', { text: '本周进度怎么样' }));
+
+    expect(ai.chat).toHaveBeenCalledTimes(1);
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ to: 'libu_li2' }));
+  });
+
+  it('normalizes non-string intent to unknown', async () => {
+    const { agent, enqueue, ai } = createAgent();
+    vi.mocked(ai.chat).mockResolvedValueOnce({
+      content: '{"intent":null}',
+      inputTokens: 10,
+      outputTokens: 5
+    });
+
+    await agent.handle(createMessage('unknown', { text: '随便看看' }));
 
     expect(ai.chat).toHaveBeenCalledTimes(1);
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ to: 'libu_bing' }));

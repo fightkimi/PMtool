@@ -36,3 +36,7 @@ venv/
 # misc
 tmp/
 temp/
+scripts/test-*.ts
+scripts/debug-*.ts
+scripts/temp-*.ts
+src/**/*.temp

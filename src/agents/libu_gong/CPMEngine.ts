@@ -165,7 +165,7 @@ export class CPMEngine {
         data: {
           plannedStart: addDays(run.createdAt, earlyStart.get(id) ?? 0),
           plannedEnd: addDays(run.createdAt, earlyFinish.get(id) ?? 0),
-          floatDays: String(floatDays)
+          floatDays
         }
       });
     }
@@ -181,7 +181,7 @@ export class CPMEngine {
         ...stage,
         plannedStart: (update?.data.plannedStart as Date | undefined) ?? stage.plannedStart,
         plannedEnd: (update?.data.plannedEnd as Date | undefined) ?? stage.plannedEnd,
-        floatDays: (update?.data.floatDays as string | undefined) ?? stage.floatDays
+        floatDays: (update?.data.floatDays as number | undefined) ?? stage.floatDays
       };
     });
 

@@ -69,7 +69,7 @@ function createAgent() {
       assigneeId: 'u1',
       reviewerId: null,
       department: 'libu_li',
-      estimatedHours: '8',
+      estimatedHours: 8,
       actualHours: null,
       earliestStart: null,
       latestFinish: null,
@@ -125,7 +125,7 @@ describe('LibuLi2Agent', () => {
   });
 
   it('formats progress update labels', async () => {
-    const { agent, im } = createAgent();
+    const { agent, im, ai } = createAgent();
     await agent.handle({
       id: 'msg-1',
       from: 'libu_gong',
@@ -141,10 +141,11 @@ describe('LibuLi2Agent', () => {
       'https://example.com/hook',
       expect.stringContaining('进行中 → 待验收')
     );
+    expect(ai.chat).not.toHaveBeenCalled();
   });
 
   it('notifies all affected users about change', async () => {
-    const { agent, im } = createAgent();
+    const { agent, im, ai } = createAgent();
     await agent.handle({
       id: 'msg-1',
       from: 'shangshu',
@@ -158,5 +159,6 @@ describe('LibuLi2Agent', () => {
 
     expect(im.sendDM).toHaveBeenCalledTimes(2);
     expect(new Set(vi.mocked(im.sendDM).mock.calls.map((call) => call[0]))).toEqual(new Set(['im-u1', 'im-u2']));
+    expect(ai.chat).not.toHaveBeenCalled();
   });
 });

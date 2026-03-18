@@ -18,6 +18,16 @@ const intentKeywords: Record<Exclude<IntentType, 'unknown'>, string[]> = {
   postmortem: ['复盘', '总结', '项目结束', '项目收尾']
 };
 
+const intentPriority: Array<Exclude<IntentType, 'unknown'>> = [
+  'change_request',
+  'risk_scan',
+  'capacity_evaluate',
+  'capacity_forecast',
+  'weekly_report',
+  'postmortem',
+  'parse_requirement'
+];
+
 function extractParams(text: string): Record<string, string> {
   const params: Record<string, string> = {};
   const separators = ['：', ':', '=', '为'];
@@ -48,9 +58,8 @@ export function parse(text: string): { intent: IntentType; params: Record<string
   const normalized = text.trim();
   const params = extractParams(normalized);
 
-  for (const [intent, keywords] of Object.entries(intentKeywords) as Array<
-    [Exclude<IntentType, 'unknown'>, string[]]
-  >) {
+  for (const intent of intentPriority) {
+    const keywords = intentKeywords[intent];
     if (keywords.some((keyword) => normalized.includes(keyword))) {
       return { intent, params };
     }

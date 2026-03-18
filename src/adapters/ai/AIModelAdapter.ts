@@ -5,22 +5,13 @@ import type {
   AIMessage,
   AIOptions,
   AIResponse,
-  AnthropicMessageClient,
-  SupportedAIModel
+  AnthropicMessageClient
 } from '@/adapters/types';
 import type { AgentType } from '@/lib/schema';
+import { agentLogger } from '@/workers/logger';
+import { getAllAliases, resolveModel, type ModelConfig, type ProviderConfig } from './providers';
 
 const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-4-6';
-const DEFAULT_DEEPSEEK_MODEL = 'deepseek-chat';
-const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1';
-
-function computeCost(model: SupportedAIModel, inputTokens: number, outputTokens: number): number {
-  if (model === 'deepseek') {
-    return (inputTokens * 0.14 + outputTokens * 0.28) / 1_000_000;
-  }
-
-  return (inputTokens * 3 + outputTokens * 15) / 1_000_000;
-}
 
 function splitMessages(messages: AIMessage[]) {
   const system = messages
@@ -99,16 +90,71 @@ async function* streamSseResponse(response: Response): AsyncGenerator<string> {
   }
 }
 
-export function selectModel(agentType: AgentType): SupportedAIModel {
-  if (agentType === 'zhongshu' || agentType === 'menxia') {
-    return 'claude';
+async function fetchWithTimeout(
+  fetcher: typeof fetch,
+  input: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetcher(input, {
+      ...init,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error(`AI 请求超时（${timeoutMs}ms）：${input}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function getAgentModelOverride(agentType?: string): string | undefined {
+  if (!agentType) {
+    return undefined;
   }
 
-  if (agentType === 'libu_li2' || agentType === 'libu_hu') {
-    return 'deepseek';
+  const agentKey = `${agentType.toUpperCase()}_MODEL`;
+  return process.env[agentKey];
+}
+
+function getRequestPath(provider: ProviderConfig): string {
+  return provider.chatPath ?? '/chat/completions';
+}
+
+function getProviderApiKey(config: AIAdapterConfig, provider: ProviderConfig): string | undefined {
+  const explicitKeys = config.apiKeys?.[provider.name];
+  if (explicitKeys) {
+    return explicitKeys;
   }
 
-  return 'claude';
+  if (provider.name === 'claude') {
+    return config.anthropicApiKey ?? process.env[provider.apiKeyEnv];
+  }
+
+  if (provider.name === 'deepseek' || provider.name === 'deepseek-reasoner') {
+    return config.deepseekApiKey ?? process.env[provider.apiKeyEnv];
+  }
+
+  if (provider.name === 'minimax') {
+    return config.minimaxApiKey ?? process.env[provider.apiKeyEnv];
+  }
+
+  return process.env[provider.apiKeyEnv];
+}
+
+export function selectModel(agentType: AgentType): string {
+  const agentOverride = getAgentModelOverride(agentType);
+  if (agentOverride) {
+    return agentOverride;
+  }
+
+  return process.env.DEFAULT_AI_MODEL ?? 'claude';
 }
 
 export class AIModelAdapter implements AIAdapter {
@@ -121,82 +167,56 @@ export class AIModelAdapter implements AIAdapter {
   constructor(config: AIAdapterConfig) {
     this.config = {
       anthropicModel: DEFAULT_ANTHROPIC_MODEL,
-      deepseekBaseUrl: DEFAULT_DEEPSEEK_BASE_URL,
       ...config
     };
     this.fetcher = config.fetcher ?? fetch;
     this.anthropicClient =
       config.anthropicClient ??
       new Anthropic({
-        apiKey: config.anthropicApiKey
+        apiKey: config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY
       });
   }
 
-  async chat(messages: AIMessage[], options: AIOptions): Promise<AIResponse> {
-    const model = options.model ?? 'claude';
-    const temperature = options.temperature ?? 0.2;
-    const maxTokens = options.maxTokens ?? 1024;
+  async chat(messages: AIMessage[], options: AIOptions = {}): Promise<AIResponse> {
+    const modelAlias = options.model ?? getAgentModelOverride(options.agentType) ?? process.env.DEFAULT_AI_MODEL ?? 'claude';
+    const resolved = resolveModel(modelAlias);
 
-    if (model === 'deepseek') {
-      return this.chatWithDeepSeek(messages, { ...options, model, temperature, maxTokens });
+    if (!resolved) {
+      throw new Error(`未知的模型：${modelAlias}。可用模型别名：${getAllAliases().join(', ')}`);
     }
 
-    return this.chatWithClaude(messages, { ...options, model, temperature, maxTokens });
+    const { provider, model } = resolved;
+
+    if (provider.name === 'claude') {
+      return this.callClaude(messages, options, model);
+    }
+
+    return this.callOpenAICompatible(messages, options, provider, model);
   }
 
-  async *stream(messages: AIMessage[], options: AIOptions): AsyncGenerator<string> {
-    const model = options.model ?? 'claude';
-    const temperature = options.temperature ?? 0.2;
-    const maxTokens = options.maxTokens ?? 1024;
+  async *stream(messages: AIMessage[], options: AIOptions = {}): AsyncGenerator<string> {
+    const modelAlias = options.model ?? getAgentModelOverride(options.agentType) ?? process.env.DEFAULT_AI_MODEL ?? 'claude';
+    const resolved = resolveModel(modelAlias);
 
-    if (model === 'deepseek') {
-      const response = await this.fetcher(`${this.config.deepseekBaseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.config.deepseekApiKey ?? ''}`
-        },
-        body: JSON.stringify({
-          model: DEFAULT_DEEPSEEK_MODEL,
-          stream: true,
-          temperature,
-          max_tokens: maxTokens,
-          messages
-        })
-      });
-      yield* streamSseResponse(response);
+    if (!resolved) {
+      throw new Error(`未知的模型：${modelAlias}。可用模型别名：${getAllAliases().join(', ')}`);
+    }
+
+    const { provider, model } = resolved;
+    if (provider.name === 'claude') {
+      yield* this.streamClaude(messages, options, model);
       return;
     }
 
-    const { system, conversation } = splitMessages(messages);
-    const response = await this.fetcher('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': this.config.anthropicApiKey ?? '',
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: this.config.anthropicModel,
-        stream: true,
-        temperature,
-        max_tokens: maxTokens,
-        system,
-        messages: conversation
-      })
-    });
-    yield* streamSseResponse(response);
+    yield* this.streamOpenAICompatible(messages, options, provider, model);
   }
 
-  private async chatWithClaude(
-    messages: AIMessage[],
-    options: AIOptions & { model: SupportedAIModel; temperature: number; maxTokens: number }
-  ): Promise<AIResponse> {
+  private async callClaude(messages: AIMessage[], options: AIOptions, model: ModelConfig): Promise<AIResponse> {
     const { system, conversation } = splitMessages(messages);
     const response = await this.anthropicClient.messages.create({
-      model: this.config.anthropicModel,
-      max_tokens: options.maxTokens,
-      temperature: options.temperature,
+      model: model.id,
+      max_tokens: options.maxTokens ?? 2000,
+      temperature: options.temperature ?? 0.7,
       system,
       messages: conversation
     });
@@ -204,6 +224,7 @@ export class AIModelAdapter implements AIAdapter {
     const usage = (response.usage ?? {}) as { input_tokens?: number; output_tokens?: number };
     const inputTokens = usage.input_tokens ?? 0;
     const outputTokens = usage.output_tokens ?? 0;
+    const costUsd = (inputTokens * model.inputCostPer1M + outputTokens * model.outputCostPer1M) / 1_000_000;
     const result: AIResponse = {
       content: extractAnthropicText(response.content),
       inputTokens,
@@ -211,51 +232,167 @@ export class AIModelAdapter implements AIAdapter {
     };
 
     options.onUsage?.({
-      model: 'claude',
+      model: model.id,
       inputTokens,
       outputTokens,
-      costUsd: computeCost('claude', inputTokens, outputTokens)
+      costUsd
     });
+    agentLogger.aiCall(
+      options.agentType ?? 'unknown',
+      model.id,
+      messages[messages.length - 1]?.content ?? '',
+      inputTokens,
+      outputTokens,
+      false
+    );
 
     return result;
   }
 
-  private async chatWithDeepSeek(
+  private async callOpenAICompatible(
     messages: AIMessage[],
-    options: AIOptions & { model: SupportedAIModel; temperature: number; maxTokens: number }
+    options: AIOptions,
+    provider: ProviderConfig,
+    model: ModelConfig
   ): Promise<AIResponse> {
-    const response = await this.fetcher(`${this.config.deepseekBaseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.config.deepseekApiKey ?? ''}`
+    const apiKey = getProviderApiKey(this.config, provider);
+    if (!apiKey) {
+      throw new Error(`缺少环境变量 ${provider.apiKeyEnv}（provider: ${provider.name}）`);
+    }
+
+    const timeoutMs = model.timeoutMs ?? parseInt(process.env.AI_REQUEST_TIMEOUT_MS ?? '45000', 10);
+    const url = `${provider.baseUrl}${getRequestPath(provider)}`;
+    const startedAt = Date.now();
+
+    const response = await fetchWithTimeout(
+      this.fetcher,
+      url,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...provider.requestHeaders
+        },
+        body: JSON.stringify({
+          model: model.id,
+          messages,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 2000,
+          stream: false
+        })
       },
-      body: JSON.stringify({
-        model: DEFAULT_DEEPSEEK_MODEL,
-        temperature: options.temperature,
-        max_tokens: options.maxTokens,
-        messages
-      })
-    });
+      timeoutMs
+    );
+
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string } }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
+      base_resp?: { status_code?: number; status_msg?: string };
     };
+
+    if (provider.name === 'minimax' && data.base_resp?.status_code !== undefined && data.base_resp.status_code !== 0 && !data.choices) {
+      throw new Error(`${provider.name} API 错误：${data.base_resp.status_msg || JSON.stringify(data).slice(0, 200)}`);
+    }
+
+    if (!response.ok || !data.choices) {
+      throw new Error(`${provider.name} API 错误：${JSON.stringify(data).slice(0, 200)}`);
+    }
+
+    let rawContent = data.choices[0]?.message?.content ?? '';
+    if (provider.stripThinkBlocks) {
+      rawContent = rawContent.replace(/<think>[\s\S]*?<\/think>\n?/g, '').trim();
+    }
+    const content = rawContent;
     const inputTokens = data.usage?.prompt_tokens ?? 0;
     const outputTokens = data.usage?.completion_tokens ?? 0;
-    const result: AIResponse = {
-      content: data.choices?.[0]?.message?.content ?? '',
-      inputTokens,
-      outputTokens
-    };
+    const costUsd = (inputTokens * model.inputCostPer1M + outputTokens * model.outputCostPer1M) / 1_000_000;
+
+    console.log(
+      JSON.stringify({
+        type: 'AI_TIMING',
+        provider: provider.name,
+        model: model.id,
+        total_ms: Date.now() - startedAt,
+        tokens_in: inputTokens,
+        tokens_out: outputTokens,
+        ts: new Date().toISOString()
+      })
+    );
 
     options.onUsage?.({
-      model: 'deepseek',
+      model: model.id,
       inputTokens,
       outputTokens,
-      costUsd: computeCost('deepseek', inputTokens, outputTokens)
+      costUsd
+    });
+    agentLogger.aiCall(
+      options.agentType ?? 'unknown',
+      model.id,
+      messages[messages.length - 1]?.content ?? '',
+      inputTokens,
+      outputTokens,
+      false
+    );
+
+    return { content, inputTokens, outputTokens };
+  }
+
+  private async *streamClaude(messages: AIMessage[], options: AIOptions, model: ModelConfig): AsyncGenerator<string> {
+    const { system, conversation } = splitMessages(messages);
+    const response = await this.fetcher('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': this.config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY ?? '',
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: model.id,
+        stream: true,
+        temperature: options.temperature ?? 0.7,
+        max_tokens: options.maxTokens ?? 2000,
+        system,
+        messages: conversation
+      })
     });
 
-    return result;
+    yield* streamSseResponse(response);
+  }
+
+  private async *streamOpenAICompatible(
+    messages: AIMessage[],
+    options: AIOptions,
+    provider: ProviderConfig,
+    model: ModelConfig
+  ): AsyncGenerator<string> {
+    const apiKey = getProviderApiKey(this.config, provider);
+    if (!apiKey) {
+      throw new Error(`缺少环境变量 ${provider.apiKeyEnv}（provider: ${provider.name}）`);
+    }
+
+    const timeoutMs = model.timeoutMs ?? parseInt(process.env.AI_REQUEST_TIMEOUT_MS ?? '45000', 10);
+    const response = await fetchWithTimeout(
+      this.fetcher,
+      `${provider.baseUrl}${getRequestPath(provider)}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          ...provider.requestHeaders
+        },
+        body: JSON.stringify({
+          model: model.id,
+          messages,
+          temperature: options.temperature ?? 0.7,
+          max_tokens: options.maxTokens ?? 2000,
+          stream: true
+        })
+      },
+      timeoutMs
+    );
+
+    yield* streamSseResponse(response);
   }
 }

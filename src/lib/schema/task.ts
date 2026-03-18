@@ -48,11 +48,11 @@ export const tasks = pgTable(
     assigneeId: uuid('assignee_id').references(() => users.id, { onDelete: 'set null' }),
     reviewerId: uuid('reviewer_id').references(() => users.id, { onDelete: 'set null' }),
     department: taskDepartmentEnum('department'),
-    estimatedHours: numeric('estimated_hours', { precision: 5, scale: 1 }),
-    actualHours: numeric('actual_hours', { precision: 5, scale: 1 }),
+    estimatedHours: numeric('estimated_hours', { precision: 5, scale: 1, mode: 'number' }),
+    actualHours: numeric('actual_hours', { precision: 5, scale: 1, mode: 'number' }),
     earliestStart: timestamp('earliest_start', { withTimezone: true }),
     latestFinish: timestamp('latest_finish', { withTimezone: true }),
-    floatDays: numeric('float_days', { precision: 5, scale: 1 }),
+    floatDays: numeric('float_days', { precision: 5, scale: 1, mode: 'number' }),
     githubIssueNumber: integer('github_issue_number'),
     acceptanceCriteria: text('acceptance_criteria')
       .array()

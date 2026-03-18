@@ -2,6 +2,7 @@ import { Job, Queue, Worker } from 'bullmq';
 import type { JobsOptions } from 'bullmq';
 import type { AgentMessage } from './types';
 import type { AgentRouter } from './AgentRouter';
+import { agentLogger } from '@/workers/logger';
 
 type QueueLike = {
   add: (name: string, data: AgentMessage, opts?: JobsOptions) => Promise<{ id?: string | number }>;
@@ -58,6 +59,7 @@ export class AgentQueue {
   }
 
   async enqueue(message: AgentMessage, options?: { delay?: number }): Promise<string> {
+    agentLogger.agentStart(message.from, message.to, message.payload);
     const job = await this.getQueue().add(message.to, message, {
       delay: options?.delay,
       priority: mapPriority(message.priority)

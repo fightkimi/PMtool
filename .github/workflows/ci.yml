@@ -48,6 +48,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+      - run: npm run check:structure
       - run: npm run db:migrate
       - run: npm run test:coverage
       - name: Check coverage thresholds

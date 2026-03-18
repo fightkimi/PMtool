@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { getActiveProjects } from '@/lib/queries/projects';
 import type { IntentType } from '@/adapters/wecom/IntentParser';
+import { callAIWithRetry } from '@/agents/base/aiUtils';
 import { agentQueue, type AgentQueue } from '@/agents/base/AgentQueue';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import type { AgentMessage, AgentType } from '@/agents/base/types';
@@ -13,7 +14,7 @@ type ZhongshuiDeps = BaseAgentDeps & {
 };
 
 const INTENT_SYSTEM_PROMPT =
-  '判断以下消息的项目管理意图，返回：parse_requirement/weekly_report/risk_scan/capacity_evaluate/capacity_forecast/change_request/postmortem/unknown';
+  '判断以下消息的项目管理意图，返回 JSON：{"intent":"parse_requirement|weekly_report|risk_scan|capacity_evaluate|capacity_forecast|change_request|postmortem|unknown"}。只输出 JSON。';
 
 function normalizeIntent(value: string): IntentType {
   const normalized = value.trim() as IntentType;
@@ -112,15 +113,21 @@ export class ZhongshuiAgent extends BaseAgent {
   }
 
   private async resolveIntent(text: string): Promise<IntentType> {
-    const response = await this.getAIAdapter().chat(
+    const result = (await callAIWithRetry(
+      this.getAIAdapter(),
       [
         { role: 'system', content: INTENT_SYSTEM_PROMPT },
         { role: 'user', content: text }
       ],
-      {}
-    );
+      {
+        temperature: 0.1,
+        maxTokens: 100
+      },
+      2
+    )) as { intent?: unknown };
 
-    return normalizeIntent(response.content);
+    const intent = typeof result?.intent === 'string' ? result.intent : 'unknown';
+    return normalizeIntent(intent);
   }
 
   private buildOutboundMessage(

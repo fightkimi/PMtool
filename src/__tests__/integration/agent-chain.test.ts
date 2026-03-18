@@ -415,7 +415,7 @@ describe('agent integration chain', () => {
         plannedStart: new Date('2026-03-20T00:00:00.000Z'),
         plannedEnd: nextMonday,
         dependsOn: [],
-        estimatedHours: '24',
+        estimatedHours: 24,
         status: 'active'
       },
       {
@@ -426,7 +426,7 @@ describe('agent integration chain', () => {
         plannedStart: nextMonday,
         plannedEnd: nextFriday,
         dependsOn: ['A'],
-        estimatedHours: '24',
+        estimatedHours: 24,
         status: 'pending'
       }
     ]);
@@ -566,7 +566,7 @@ describe('agent integration chain', () => {
         assigneeId: user.id,
         plannedStart: new Date('2026-03-23T00:00:00.000Z'),
         plannedEnd: new Date('2026-03-27T00:00:00.000Z'),
-        estimatedHours: '24',
+        estimatedHours: 24,
         dependsOn: [],
         status: 'active'
       },
@@ -577,7 +577,7 @@ describe('agent integration chain', () => {
         assigneeId: user.id,
         plannedStart: new Date('2026-03-24T00:00:00.000Z'),
         plannedEnd: new Date('2026-03-28T00:00:00.000Z'),
-        estimatedHours: '24',
+        estimatedHours: 24,
         dependsOn: [],
         status: 'active'
       },
@@ -588,7 +588,7 @@ describe('agent integration chain', () => {
         assigneeId: user.id,
         plannedStart: new Date('2026-03-30T00:00:00.000Z'),
         plannedEnd: new Date('2026-04-03T00:00:00.000Z'),
-        estimatedHours: '24',
+        estimatedHours: 24,
         dependsOn: [],
         status: 'active'
       },
@@ -599,7 +599,7 @@ describe('agent integration chain', () => {
         assigneeId: user.id,
         plannedStart: new Date('2026-03-31T00:00:00.000Z'),
         plannedEnd: new Date('2026-04-04T00:00:00.000Z'),
-        estimatedHours: '24',
+        estimatedHours: 24,
         dependsOn: [],
         status: 'active'
       }

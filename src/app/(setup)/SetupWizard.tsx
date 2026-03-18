@@ -38,8 +38,8 @@ export function SetupWizard() {
   const [projectName, setProjectName] = useState('');
   const [projectType, setProjectType] = useState<ProjectType>('custom');
   const [pmName, setPmName] = useState('');
-  const [groupWebhook, setGroupWebhook] = useState('');
-  const [mgmtWebhook, setMgmtWebhook] = useState('');
+  const [groupChatId, setGroupChatId] = useState('');
+  const [mgmtChatId, setMgmtChatId] = useState('');
   const [wecomStatus, setWecomStatus] = useState<{ success?: boolean; error?: string }>({});
   const [rootId, setRootId] = useState('');
   const [tableIds, setTableIds] = useState<TableIds | null>(null);
@@ -104,14 +104,14 @@ export function SetupWizard() {
   }
 
   async function handleValidateWeCom() {
-    if (!groupWebhook.trim()) {
-      setWecomStatus({ success: false, error: '请输入项目群 Webhook URL' });
+    if (!groupChatId.trim()) {
+      setWecomStatus({ success: false, error: '请输入项目群群 ID' });
       return;
     }
 
     const result = await requestJson<{ success: boolean; error?: string }>('/api/setup/validate-wecom', {
       method: 'POST',
-      body: JSON.stringify({ webhook_url: groupWebhook })
+      body: JSON.stringify({ group_id: groupChatId })
     });
     setWecomStatus(result);
   }
@@ -159,9 +159,9 @@ export function SetupWizard() {
         method: 'POST',
         body: JSON.stringify({
           project_id: projectId,
-          wecom_group_id: groupWebhook,
-          wecom_bot_webhook: groupWebhook,
-          wecom_mgmt_group_id: mgmtWebhook,
+          wecom_group_id: groupChatId,
+          wecom_bot_webhook: null,
+          wecom_mgmt_group_id: mgmtChatId,
           smart_table_root_id: rootId,
           ...tableIds,
           selected_pipeline_ids: selectedPipelineIds
@@ -223,8 +223,9 @@ export function SetupWizard() {
             {step === 1 && (
               <div className="space-y-4">
                 <h1 className="text-3xl font-semibold">Step 2. 绑定企业微信</h1>
-                <input className="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="https://qyapi.weixin.qq.com/..." value={groupWebhook} onChange={(event) => setGroupWebhook(event.target.value)} />
-                <input className="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="管理层群 Webhook URL（可选）" value={mgmtWebhook} onChange={(event) => setMgmtWebhook(event.target.value)} />
+                <p className="text-sm text-slate-500">群 ID 获取方式：企业微信后台 → 客户与上下游 → 内部群 → 找到对应群 → 复制群 ID</p>
+                <input className="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="项目群 chatid（必填）" value={groupChatId} onChange={(event) => setGroupChatId(event.target.value)} />
+                <input className="w-full rounded-2xl border border-slate-200 px-4 py-3" placeholder="管理层群 chatid（可选）" value={mgmtChatId} onChange={(event) => setMgmtChatId(event.target.value)} />
                 <div className="flex gap-3">
                   <button className="rounded-full bg-emerald-700 px-6 py-3 text-white" onClick={() => void handleValidateWeCom()}>
                     发送测试消息

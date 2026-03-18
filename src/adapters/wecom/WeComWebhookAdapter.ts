@@ -1,9 +1,18 @@
 import { createDecipheriv, createHash } from 'node:crypto';
 import type { IMAdapter, IMCard, IMMessage, IMUser, IncomingMessage, WeComAdapterConfig } from '@/adapters/types';
+import { agentLogger } from '@/workers/logger';
 
 type TokenCacheValue = {
   token: string;
   expiresAt: number;
+};
+
+type WeComApiResponse = {
+  errcode?: number;
+  errmsg?: string;
+  access_token?: string;
+  expires_in?: number;
+  memberlist?: Array<{ userid?: string; name?: string; email?: string }>;
 };
 
 type WeComIncomingPayload =
@@ -53,7 +62,7 @@ function extractXmlValue(xml: string, tag: string): string | undefined {
   return match?.[1] ?? match?.[2];
 }
 
-export class WeComAdapter implements IMAdapter {
+export class WeComWebhookAdapter implements IMAdapter {
   private static tokenCache = new Map<string, TokenCacheValue>();
 
   private config: WeComAdapterConfig;
@@ -62,37 +71,60 @@ export class WeComAdapter implements IMAdapter {
 
   constructor(config: WeComAdapterConfig) {
     this.config = {
-      baseUrl: DEFAULT_BASE_URL,
-      ...config
+      ...config,
+      baseUrl: config.baseUrl ?? DEFAULT_BASE_URL
     };
     this.fetcher = config.fetcher ?? fetch;
   }
 
   async sendMessage(groupId: string, text: string): Promise<void> {
-    await this.postWebhook(groupId, {
+    const token = await this.getAccessToken();
+    if (!token) {
+      return;
+    }
+
+    await this.postAppMessage(token, {
+      chatid: groupId,
       msgtype: 'text',
       text: { content: text }
     });
   }
 
   async sendMarkdown(groupId: string, markdown: string): Promise<void> {
-    await this.postWebhook(groupId, {
+    agentLogger.wecom(groupId, 'markdown', markdown);
+    const token = await this.getAccessToken();
+    if (!token) {
+      return;
+    }
+
+    await this.postAppMessage(token, {
+      chatid: groupId,
       msgtype: 'markdown',
       markdown: { content: markdown }
     });
   }
 
   async sendCard(groupId: string, card: IMCard): Promise<void> {
-    const lines = [`**${card.title}**`, card.content];
-    if (card.buttons?.length) {
-      lines.push('');
-      lines.push(...card.buttons.map((button, index) => `${index + 1}. ${button.text}（回复：${button.action}）`));
+    agentLogger.wecom(groupId, 'card', JSON.stringify(card));
+    const token = await this.getAccessToken();
+    if (!token) {
+      return;
     }
 
-    await this.sendMarkdown(groupId, lines.join('\n'));
+    await this.postAppMessage(token, {
+      chatid: groupId,
+      msgtype: 'textcard',
+      textcard: {
+        title: card.title,
+        description: card.content,
+        url: 'https://work.weixin.qq.com',
+        btntxt: card.buttons?.[0]?.text ?? '查看'
+      }
+    });
   }
 
   async sendDM(userId: string, content: IMMessage): Promise<void> {
+    agentLogger.wecom(userId, 'dm', JSON.stringify(content));
     const token = await this.getAccessToken();
     if (!token) {
       return;
@@ -114,10 +146,14 @@ export class WeComAdapter implements IMAdapter {
           };
 
     await withRetry(async () => {
-      await this.fetcher(`${this.config.baseUrl}/cgi-bin/message/send?access_token=${token}`, {
+      const response = await this.fetcher(`${this.config.baseUrl}/cgi-bin/message/send?access_token=${token}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
+      });
+      await this.assertWeComSuccess(response, 'message/send', {
+        touser: userId,
+        msgtype: String(body.msgtype ?? '')
       });
     });
   }
@@ -133,7 +169,7 @@ export class WeComAdapter implements IMAdapter {
     const content = extractXmlValue(xml, 'Content');
     const eventKey = extractXmlValue(xml, 'EventKey');
     const userId = extractXmlValue(xml, 'FromUserName');
-    const groupId = extractXmlValue(xml, 'ToUserName');
+    const groupId = extractXmlValue(xml, 'ChatId') ?? extractXmlValue(xml, 'FromUserName');
 
     if (!userId || !groupId) {
       return null;
@@ -165,9 +201,7 @@ export class WeComAdapter implements IMAdapter {
     const response = await this.fetcher(
       `${this.config.baseUrl}/cgi-bin/appchat/get?chatid=${encodeURIComponent(groupId)}&access_token=${token}`
     );
-    const data = (await response.json()) as {
-      memberlist?: Array<{ userid?: string; name?: string; email?: string }>;
-    };
+    const data = (await response.json()) as WeComApiResponse;
 
     return (data.memberlist ?? []).map((member) => ({
       userId: member.userid ?? '',
@@ -176,19 +210,59 @@ export class WeComAdapter implements IMAdapter {
     }));
   }
 
-  private resolveWebhook(groupId: string): string {
-    return this.config.groupWebhookMap?.[groupId] ?? groupId;
-  }
+  private async postAppMessage(accessToken: string, body: Record<string, unknown>): Promise<void> {
+    const hasChatId = typeof body.chatid === 'string' && body.chatid.length > 0;
+    const endpoint = hasChatId ? 'appchat/send' : 'message/send';
+    const url = `${this.config.baseUrl}/cgi-bin/${endpoint}?access_token=${accessToken}`;
 
-  private async postWebhook(groupId: string, body: Record<string, unknown>): Promise<void> {
-    const webhookUrl = this.resolveWebhook(groupId);
     await withRetry(async () => {
-      await this.fetcher(webhookUrl, {
+      const response = await this.fetcher(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body)
       });
+      await this.assertWeComSuccess(response, endpoint, {
+        chatid: typeof body.chatid === 'string' ? body.chatid : undefined,
+        msgtype: String(body.msgtype ?? '')
+      });
     });
+  }
+
+  private async assertWeComSuccess(
+    response: Response,
+    endpoint: string,
+    meta?: { chatid?: string; touser?: string; msgtype?: string }
+  ): Promise<void> {
+    let data: WeComApiResponse | null = null;
+    try {
+      data = (await response.json()) as WeComApiResponse;
+    } catch {
+      if (!response.ok) {
+        throw new Error(`[WeComWebhook:${endpoint}] HTTP ${response.status} ${response.statusText}`);
+      }
+      return;
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        `[WeComWebhook:${endpoint}] HTTP ${response.status} ${response.statusText}: ${JSON.stringify(data).slice(0, 300)}`
+      );
+    }
+
+    if ((data.errcode ?? 0) !== 0) {
+      throw new Error(
+        `[WeComWebhook:${endpoint}] errcode=${data.errcode} errmsg=${data.errmsg ?? 'unknown'}`
+      );
+    }
+
+    console.info(
+      `[WeComWebhook:${endpoint}] ok`,
+      JSON.stringify({
+        chatid: meta?.chatid,
+        touser: meta?.touser,
+        msgtype: meta?.msgtype
+      })
+    );
   }
 
   private getTokenCacheKey(): string {
@@ -197,7 +271,7 @@ export class WeComAdapter implements IMAdapter {
 
   private async getAccessToken(): Promise<string | undefined> {
     const cacheKey = this.getTokenCacheKey();
-    const cached = WeComAdapter.tokenCache.get(cacheKey);
+    const cached = WeComWebhookAdapter.tokenCache.get(cacheKey);
     const now = Date.now();
 
     if (cached && cached.expiresAt - now > TOKEN_REFRESH_BUFFER_MS) {
@@ -211,14 +285,14 @@ export class WeComAdapter implements IMAdapter {
     const response = await this.fetcher(
       `${this.config.baseUrl}/cgi-bin/gettoken?corpid=${encodeURIComponent(this.config.corpId)}&corpsecret=${encodeURIComponent(this.config.agentSecret)}`
     );
-    const data = (await response.json()) as { access_token?: string; expires_in?: number };
+    const data = (await response.json()) as WeComApiResponse;
 
-    if (!data.access_token) {
+    if ((data.errcode ?? 0) !== 0 || !data.access_token) {
       return undefined;
     }
 
     const expiresInMs = (data.expires_in ?? TOKEN_TTL_MS / 1000) * 1000;
-    WeComAdapter.tokenCache.set(cacheKey, {
+    WeComWebhookAdapter.tokenCache.set(cacheKey, {
       token: data.access_token,
       expiresAt: now + expiresInMs
     });
@@ -280,10 +354,10 @@ export class WeComAdapter implements IMAdapter {
   }
 
   static clearTokenCache() {
-    WeComAdapter.tokenCache.clear();
+    WeComWebhookAdapter.tokenCache.clear();
   }
 
   static inspectTokenCache(key: string) {
-    return WeComAdapter.tokenCache.get(key);
+    return WeComWebhookAdapter.tokenCache.get(key);
   }
 }
