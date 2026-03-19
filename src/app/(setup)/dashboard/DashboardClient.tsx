@@ -92,7 +92,12 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
     }
   });
 
-  return response.json() as Promise<T>;
+  const data = await response.json() as T & { error?: string };
+  if (!response.ok) {
+    throw new Error(data.error ?? `请求失败 (${response.status})`);
+  }
+
+  return data;
 }
 
 function createEmptyProjectForm(): ProjectFormState {
@@ -289,6 +294,8 @@ export function DashboardClient() {
 
       setProjectModalOpen(false);
       await refreshStatus();
+    } catch (error) {
+      setPageError(error instanceof Error ? error.message : '保存失败');
     } finally {
       setSavingProject(false);
     }
@@ -699,7 +706,7 @@ export function DashboardClient() {
 
       {projectModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 px-4">
-          <div className="flex max-h-screen w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white p-6 shadow-2xl">
             <div className="flex items-center justify-between gap-4">
               <div>
                 <p className="text-sm font-medium text-slate-500">{projectForm.id ? '编辑项目配置' : '新增项目'}</p>
@@ -710,8 +717,8 @@ export function DashboardClient() {
               </button>
             </div>
 
-            <div className="mt-6 flex-1 overflow-y-auto">
-              <div className="grid max-h-[80vh] gap-4 md:grid-cols-2">
+            <div className="mt-6 min-h-0 flex-1 overflow-y-auto">
+              <div className="grid gap-4 md:grid-cols-2">
               <input
                 className="rounded-2xl border border-slate-200 px-4 py-3"
                 placeholder="项目名称"
@@ -763,7 +770,7 @@ export function DashboardClient() {
               </div>
             </div>
 
-            <div className="sticky bottom-0 mt-6 flex justify-end gap-3 border-t border-slate-200 bg-white pt-4">
+            <div className="mt-6 flex shrink-0 justify-end gap-3 border-t border-slate-200 bg-white pt-4">
               <button className="rounded-full border border-slate-300 px-5 py-3 text-sm font-medium" onClick={() => setProjectModalOpen(false)}>
                 取消
               </button>
