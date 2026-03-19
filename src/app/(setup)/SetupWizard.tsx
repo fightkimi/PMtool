@@ -11,11 +11,11 @@ type PipelineOption = {
 };
 
 type TableIds = {
-  task_table_id: string;
-  pipeline_table_id: string;
-  capacity_table_id: string;
-  risk_table_id: string;
-  change_table_id: string;
+  task_table_webhook: string;
+  pipeline_table_webhook: string;
+  capacity_table_webhook: string;
+  risk_table_webhook: string;
+  change_table_webhook: string;
 };
 
 const steps = ['基本信息', '绑定企业微信', '绑定腾讯智能表格', '选择管线模板'];

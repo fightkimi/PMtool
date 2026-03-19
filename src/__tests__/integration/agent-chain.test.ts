@@ -73,9 +73,9 @@ function createRegistry(aiContent: string, im?: IMAdapter) {
 }
 
 async function insertWorkspaceAndProject(options?: {
-  taskTableId?: string;
-  pipelineTableId?: string;
-  riskTableId?: string;
+  taskTableWebhook?: string;
+  pipelineTableWebhook?: string;
+  riskTableWebhook?: string;
   wecomBotWebhook?: string;
   pmId?: string | null;
 }) {
@@ -98,9 +98,9 @@ async function insertWorkspaceAndProject(options?: {
       type: 'custom',
       status: 'active',
       pmId: options?.pmId ?? null,
-      taskTableId: options?.taskTableId ?? null,
-      pipelineTableId: options?.pipelineTableId ?? null,
-      riskTableId: options?.riskTableId ?? null,
+      taskTableWebhook: options?.taskTableWebhook ?? null,
+      pipelineTableWebhook: options?.pipelineTableWebhook ?? null,
+      riskTableWebhook: options?.riskTableWebhook ?? null,
       wecomBotWebhook: options?.wecomBotWebhook ?? null
     })
     .returning();
@@ -164,7 +164,7 @@ describe('agent integration chain', () => {
       return;
     }
     const { workspace, project } = await insertWorkspaceAndProject({
-      taskTableId: 'task-table-1'
+      taskTableWebhook: 'task-table-1'
     });
     const { registry } = createRegistry(
       JSON.stringify({
@@ -255,7 +255,7 @@ describe('agent integration chain', () => {
       return;
     }
     const { workspace, project } = await insertWorkspaceAndProject({
-      pipelineTableId: 'pipeline-table-1'
+      pipelineTableWebhook: 'pipeline-table-1'
     });
     const pipelineRows = await dbModule.db
       .insert(schemaModule.pipelines)

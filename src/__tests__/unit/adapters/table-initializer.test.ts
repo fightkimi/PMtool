@@ -24,11 +24,11 @@ describe('TableInitializer', () => {
 
     expect(docAdapter.createTable).toHaveBeenCalledTimes(5);
     expect(result).toEqual({
-      task_table_id: 'task-table',
-      pipeline_table_id: 'pipeline-table',
-      capacity_table_id: 'capacity-table',
-      risk_table_id: 'risk-table',
-      change_table_id: 'change-table'
+      task_table_webhook: 'task-table',
+      pipeline_table_webhook: 'pipeline-table',
+      capacity_table_webhook: 'capacity-table',
+      risk_table_webhook: 'risk-table',
+      change_table_webhook: 'change-table'
     });
   });
 });

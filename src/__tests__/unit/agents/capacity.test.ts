@@ -14,11 +14,16 @@ const projectFixture: SelectProject = {
   wecomBotWebhook: 'https://example.com/hook',
   wecomMgmtGroupId: null,
   smartTableRootId: null,
-  taskTableId: null,
-  pipelineTableId: null,
-  capacityTableId: null,
-  riskTableId: null,
-  changeTableId: null,
+  taskTableWebhook: null,
+  pipelineTableWebhook: null,
+  capacityTableWebhook: null,
+  riskTableWebhook: null,
+  changeTableWebhook: null,
+  taskTableSchema: {},
+  pipelineTableSchema: {},
+  capacityTableSchema: {},
+  riskTableSchema: {},
+  changeTableSchema: {},
   githubRepo: null,
   budget: { total: 0, spent: 0, token_budget: 0 },
   startedAt: null,
@@ -60,6 +65,7 @@ function createAgent(overloadedSnapshots: SelectCapacitySnapshot[] = []) {
   };
   const ai: AIAdapter = { chat: vi.fn(), stream: vi.fn() };
   const upsertSnapshot = vi.fn().mockResolvedValue(undefined);
+  const syncCapacityTable = vi.fn().mockResolvedValue(undefined);
   const enqueue = vi.fn().mockResolvedValue('bull-job-1');
   const users: SelectUser[] = [
     {
@@ -102,14 +108,15 @@ function createAgent(overloadedSnapshots: SelectCapacitySnapshot[] = []) {
     getStagesByProject: vi.fn().mockResolvedValue([createStage('s1', 'u1', 48), createStage('s2', 'u2', 20)]),
     getUsersByIds: vi.fn().mockResolvedValue(users),
     upsertSnapshot,
+    syncCapacityTable,
     getOverloadedSnapshots: vi.fn().mockResolvedValue(overloadedSnapshots)
   });
-  return { agent, upsertSnapshot, enqueue };
+  return { agent, upsertSnapshot, syncCapacityTable, enqueue };
 }
 
 describe('CapacityAgent', () => {
   it('creates daily snapshots and sets overload flag', async () => {
-    const { agent, upsertSnapshot } = createAgent();
+    const { agent, upsertSnapshot, syncCapacityTable } = createAgent();
 
     await agent.handle({
       id: 'msg-1',
@@ -125,6 +132,13 @@ describe('CapacityAgent', () => {
     expect(upsertSnapshot).toHaveBeenCalledTimes(2);
     expect(upsertSnapshot).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u1', overloadFlag: true }));
     expect(upsertSnapshot).toHaveBeenCalledWith(expect.objectContaining({ userId: 'u2', overloadFlag: false }));
+    expect(syncCapacityTable).toHaveBeenCalledWith(
+      'project-1',
+      expect.arrayContaining([
+        expect.objectContaining({ userId: 'u1', roleType: 'ui_designer' }),
+        expect.objectContaining({ userId: 'u2', roleType: 'qa' })
+      ])
+    );
   });
 
   it('alerts when user is overloaded for two consecutive weeks', async () => {

@@ -2,8 +2,10 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import { agentQueue, type AgentQueue } from '@/agents/base/AgentQueue';
 import type { AgentMessage } from '@/agents/base/types';
+import { registry } from '@/adapters/registry';
 import { LibuLiAgent } from '@/agents/libu_li/LibuLiAgent';
 import { db } from '@/lib/db';
+import { syncCapacitySnapshotsToTable } from '@/lib/sync/tableSync';
 import {
   capacitySnapshots,
   pipelineRuns,
@@ -43,6 +45,7 @@ type CapacityDeps = BaseAgentDeps & {
   getUsersByIds?: (ids: string[]) => Promise<SelectUser[]>;
   upsertSnapshot?: (data: SnapshotInput) => Promise<void>;
   getOverloadedSnapshots?: (workspaceId: string) => Promise<SelectCapacitySnapshot[]>;
+  syncCapacityTable?: (projectId: string, snapshots: SnapshotInput[]) => Promise<void>;
   now?: () => Date;
 };
 
@@ -80,6 +83,8 @@ export class CapacityAgent extends BaseAgent {
 
   private readonly getOverloadedSnapshotsFn: (workspaceId: string) => Promise<SelectCapacitySnapshot[]>;
 
+  private readonly syncCapacityTableFn: (projectId: string, snapshots: SnapshotInput[]) => Promise<void>;
+
   private readonly currentTime: () => Date;
 
   constructor(deps: CapacityDeps = {}) {
@@ -92,6 +97,8 @@ export class CapacityAgent extends BaseAgent {
     this.getUsersByIdsFn = deps.getUsersByIds ?? defaultGetUsersByIds;
     this.upsertSnapshotFn = deps.upsertSnapshot ?? defaultUpsertSnapshot;
     this.getOverloadedSnapshotsFn = deps.getOverloadedSnapshots ?? defaultGetOverloadedSnapshots;
+    this.syncCapacityTableFn =
+      deps.syncCapacityTable ?? (async (projectId, snapshots) => syncCapacitySnapshotsToTable(projectId, snapshots, registry.getDoc()));
     this.currentTime = deps.now ?? (() => new Date());
   }
 
@@ -108,6 +115,7 @@ export class CapacityAgent extends BaseAgent {
     const snapshotDate = this.currentTime().toISOString().slice(0, 10);
 
     for (const project of projects) {
+      const projectSnapshots: SnapshotInput[] = [];
       const [taskRows, stageRows] = await Promise.all([
         this.getTasksByProjectFn(project.id),
         this.getStagesByProjectFn(project.id)
@@ -154,7 +162,7 @@ export class CapacityAgent extends BaseAgent {
 
           const totalHours = Number(user.workHoursPerWeek ?? '40');
           const overloadFlag = allocated > totalHours * 1.1;
-          await this.upsertSnapshotFn({
+          const snapshotPayload = {
             workspaceId: payload.workspace_id,
             snapshotDate,
             weekStart: weekStart.toISOString().slice(0, 10),
@@ -165,9 +173,14 @@ export class CapacityAgent extends BaseAgent {
             availableHours: String(Math.round((totalHours - allocated) * 10) / 10),
             projectBreakdown: { [project.id]: Math.round(allocated * 10) / 10 },
             overloadFlag
-          });
+          } satisfies SnapshotInput;
+
+          await this.upsertSnapshotFn(snapshotPayload);
+          projectSnapshots.push(snapshotPayload);
         }
       }
+
+      await this.syncCapacityTableFn(project.id, projectSnapshots);
     }
 
     const overloads = await this.getOverloadedSnapshotsFn(payload.workspace_id);
@@ -201,9 +214,6 @@ export class CapacityAgent extends BaseAgent {
         }
       }
     }
-
-    console.log('update capacity heatmap placeholder');
-
     return this.createMessage(
       'capacity',
       { workspace_id: payload.workspace_id, snapshot_date: snapshotDate },

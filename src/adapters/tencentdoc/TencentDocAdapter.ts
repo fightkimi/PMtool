@@ -1,192 +1,129 @@
 import type { DocAdapter, DocField, DocFilter, DocRecord, TencentDocAdapterConfig } from '@/adapters/types';
 
-type TokenCacheValue = {
-  token: string;
-  expiresAt: number;
-};
-
-const DEFAULT_BASE_URL = 'https://docs.qq.com';
-const TOKEN_REFRESH_BUFFER_MS = 60 * 1000;
-
-type ColumnDef = { id: string; name: string };
-type RowDef = { id?: string | number; rowId?: string | number; row_no?: string | number; cells?: Record<string, unknown> };
+const MAX_BATCH_SIZE = 100;
 
 export class TencentDocAdapter implements DocAdapter {
-  private static tokenCache = new Map<string, TokenCacheValue>();
+  private readonly fetcher: typeof fetch;
+  private readonly webhookSchemas: Record<string, Record<string, string>>;
 
-  private config: TencentDocAdapterConfig;
-
-  private fetcher: typeof fetch;
-
-  constructor(config: TencentDocAdapterConfig) {
-    this.config = {
-      baseUrl: DEFAULT_BASE_URL,
-      ...config
-    };
+  constructor(config: TencentDocAdapterConfig = {}) {
     this.fetcher = config.fetcher ?? fetch;
+    this.webhookSchemas = (config.webhookSchemas ?? {}) as Record<string, Record<string, string>>;
   }
 
-  async readTable(tableId: string, filter?: DocFilter): Promise<DocRecord[]> {
-    const data = await this.request<{
-      data?: {
-        columns?: ColumnDef[];
-        rows?: RowDef[];
-        records?: Array<Record<string, unknown> | { fields?: Record<string, unknown> }>;
-      };
-    }>(`/openapi/sheetbook/v2/tables/${tableId}/records`, {
-      method: 'GET'
-    });
-
-    const records = this.normalizeRecords(data);
-    if (!filter) {
-      return records;
-    }
-
-    return records.filter((record) => String(record[filter.field] ?? '') === filter.value);
+  async readTable(_webhookUrl: string, _filter?: DocFilter): Promise<DocRecord[]> {
+    console.info('[TencentDoc] Webhook 模式不支持 readTable，已返回空数组');
+    return [];
   }
 
-  async createRecord(tableId: string, fields: DocRecord): Promise<string> {
-    const data = await this.request<{ data?: { row_no?: number | string; rowNo?: number | string; recordId?: string } }>(
-      `/openapi/sheetbook/v2/tables/${tableId}/records`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fields })
-      }
-    );
-
-    const rowId = data.data?.recordId ?? data.data?.row_no ?? data.data?.rowNo;
-    return String(rowId ?? '');
-  }
-
-  async updateRecord(tableId: string, recordId: string, fields: Partial<DocRecord>): Promise<void> {
-    await this.request(`/openapi/sheetbook/v2/tables/${tableId}/records/${recordId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fields })
-    });
-  }
-
-  async batchUpdate(tableId: string, updates: Array<{ id: string; fields: Partial<DocRecord> }>): Promise<void> {
-    await this.request(`/openapi/sheetbook/v2/tables/${tableId}/records:batchUpdate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ updates })
-    });
-  }
-
-  async findRecord(tableId: string, field: string, value: string): Promise<DocRecord | null> {
-    const records = await this.readTable(tableId, { field, value });
-    return records[0] ?? null;
-  }
-
-  async createTable(rootId: string, name: string, fields: DocField[]): Promise<string> {
-    const data = await this.request<{ data?: { tableId?: string; sheet_id?: string } }>(
-      `/openapi/sheetbook/v2/files/${rootId}/sheets`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, fields })
-      }
-    );
-
-    return data.data?.tableId ?? data.data?.sheet_id ?? '';
-  }
-
-  private async request<T = unknown>(path: string, init: RequestInit): Promise<T> {
-    const token = await this.getAccessToken();
-    const response = await this.fetcher(`${this.config.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        ...(init.headers ?? {})
-      }
-    });
-
-    return (await response.json()) as T;
-  }
-
-  private async getAccessToken(): Promise<string> {
-    const cacheKey = `${this.config.appId ?? ''}:${this.config.appSecret ?? ''}`;
-    const cached = TencentDocAdapter.tokenCache.get(cacheKey);
-    const now = Date.now();
-
-    if (cached && cached.expiresAt - now > TOKEN_REFRESH_BUFFER_MS) {
-      return cached.token;
-    }
-
-    const response = await this.fetcher(`${this.config.baseUrl}/openapi/authen/v1/token`, {
+  async createRecord(webhookUrl: string, fields: DocRecord): Promise<string> {
+    const schema = this.getWebhookSchema(webhookUrl);
+    const response = await this.fetcher(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        appid: this.config.appId,
-        appsecret: this.config.appSecret,
-        grant_type: 'client_credential'
+        add_records: [{ values: this.buildValues(fields, schema) }]
       })
     });
-    const data = (await response.json()) as { access_token?: string; expires_in?: number };
-    const token = data.access_token ?? '';
-    TencentDocAdapter.tokenCache.set(cacheKey, {
-      token,
-      expiresAt: now + (data.expires_in ?? 7200) * 1000
-    });
-
-    return token;
+    const data = await this.assertWebhookSuccess(response, 'createRecord');
+    return this.extractRecordId(data.add_records?.[0]);
   }
 
-  private normalizeRecords(data: {
-    data?: {
-      columns?: ColumnDef[];
-      rows?: RowDef[];
-      records?: Array<Record<string, unknown> | { fields?: Record<string, unknown> }>;
-    };
-  }): DocRecord[] {
-    const records = data.data?.records;
-    if (records?.length) {
-      return records.map((record) => {
-        const rawFields = ('fields' in record ? record.fields ?? {} : record) as Record<string, unknown>;
-        return this.normalizeRecord(rawFields);
+  async updateRecord(webhookUrl: string, recordId: string, fields: Partial<DocRecord>): Promise<void> {
+    await this.batchUpdate(webhookUrl, [{ id: recordId, fields }]);
+  }
+
+  async batchUpdate(
+    webhookUrl: string,
+    updates: Array<{ id: string; fields: Partial<DocRecord> }>
+  ): Promise<void> {
+    const schema = this.getWebhookSchema(webhookUrl);
+    for (let index = 0; index < updates.length; index += MAX_BATCH_SIZE) {
+      const chunk = updates.slice(index, index + MAX_BATCH_SIZE);
+      const response = await this.fetcher(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          update_records: chunk.map((item) => ({
+            record_id: item.id,
+            values: this.buildValues(item.fields, schema)
+          }))
+        })
       });
+      await this.assertWebhookSuccess(response, 'batchUpdate');
     }
-
-    const columns = data.data?.columns ?? [];
-    const rows = data.data?.rows ?? [];
-
-    return rows.map((row) => {
-      const cells = row.cells ?? {};
-      const result: DocRecord = {};
-      for (const column of columns) {
-        result[column.name] = this.normalizeValue(cells[column.id]);
-      }
-      return result;
-    });
   }
 
-  private normalizeRecord(record: Record<string, unknown>): DocRecord {
-    const result: DocRecord = {};
-    for (const [key, value] of Object.entries(record)) {
-      result[key] = this.normalizeValue(value);
+  async findRecord(_webhookUrl: string, _field: string, _value: string): Promise<DocRecord | null> {
+    console.info('[TencentDoc] Webhook 模式不支持 findRecord，已返回 null');
+    return null;
+  }
+
+  async createTable(_rootId: string, _name: string, _fields: DocField[]): Promise<string> {
+    throw new Error('Webhook 模式不支持自动创建智能表格，请在企业微信智能表格中手动开启“接收外部数据”并配置 Webhook。');
+  }
+
+  buildValues(fields: Partial<DocRecord>, schema: Record<string, string>): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    const nameToId = Object.fromEntries(Object.entries(schema).map(([id, name]) => [name, id]));
+
+    for (const [key, value] of Object.entries(fields)) {
+      if (value == null) {
+        continue;
+      }
+
+      const fieldId = nameToId[key] ?? key;
+      if (typeof value === 'number') {
+        result[fieldId] = value;
+        continue;
+      }
+
+      if (typeof value === 'boolean') {
+        result[fieldId] = value ? 1 : 0;
+        continue;
+      }
+
+      if (typeof value === 'string') {
+        result[fieldId] = /^\d{13}$/.test(value) ? value : [{ text: value }];
+      }
     }
+
     return result;
   }
 
-  private normalizeValue(value: unknown): string | number | boolean | null {
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value === null) {
-      return value;
-    }
-
-    if (value == null) {
-      return null;
-    }
-
-    if (typeof value === 'object' && 'value' in value) {
-      return this.normalizeValue((value as { value: unknown }).value);
-    }
-
-    return String(value);
+  static clearTokenCache() {
+    // no-op: webhook mode does not use access_token
   }
 
-  static clearTokenCache() {
-    TencentDocAdapter.tokenCache.clear();
+  private getWebhookSchema(webhookUrl: string): Record<string, string> {
+    return this.webhookSchemas[webhookUrl] ?? this.webhookSchemas.default ?? {};
+  }
+
+  private extractRecordId(record: unknown): string {
+    if (record && typeof record === 'object' && 'record_id' in record && typeof record.record_id === 'string') {
+      return record.record_id;
+    }
+
+    return '';
+  }
+
+  private async assertWebhookSuccess(response: Response, action: string): Promise<Record<string, any>> {
+    let data: Record<string, any> = {};
+    try {
+      data = (await response.json()) as Record<string, any>;
+    } catch {
+      data = {};
+    }
+
+    if (!response.ok) {
+      const detail = data.errmsg ? `: ${data.errmsg}` : '';
+      throw new Error(`[TencentDoc:${action}] HTTP ${response.status} ${response.statusText}${detail}`);
+    }
+
+    if (typeof data.errcode === 'number' && data.errcode !== 0) {
+      throw new Error(`智能表格写入失败: ${data.errmsg ?? `errcode=${data.errcode}`}`);
+    }
+
+    return data;
   }
 }

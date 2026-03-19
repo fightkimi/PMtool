@@ -2,7 +2,9 @@ import { randomUUID, createHmac, timingSafeEqual } from 'node:crypto';
 import { eq } from 'drizzle-orm';
 import { agentQueue } from '@/agents/base/AgentQueue';
 import type { AgentMessage } from '@/agents/base/types';
+import { registry } from '@/adapters/registry';
 import { db } from '@/lib/db';
+import { syncTaskToTable } from '@/lib/sync/tableSync';
 import { projects, tasks, type InsertTask, type SelectProject, type SelectTask } from '@/lib/schema';
 
 type GitHubWebhookDeps = {
@@ -10,7 +12,9 @@ type GitHubWebhookDeps = {
   enqueue?: (message: AgentMessage) => Promise<string>;
   getProjectByRepo?: (repo: string) => Promise<SelectProject | null>;
   getTaskByIssueNumber?: (issueNumber: number) => Promise<SelectTask | null>;
+  getProjectById?: (projectId: string) => Promise<SelectProject | null>;
   updateTask?: (id: string, data: Partial<InsertTask>) => Promise<void>;
+  syncTaskToTable?: (task: SelectTask, project: SelectProject) => Promise<void>;
   now?: () => Date;
 };
 
@@ -71,12 +75,20 @@ async function defaultUpdateTask(id: string, data: Partial<InsertTask>) {
   await db.update(tasks).set(data).where(eq(tasks.id, id));
 }
 
+async function defaultGetProjectById(projectId: string) {
+  const rows = await db.select().from(projects).where(eq(projects.id, projectId));
+  return rows[0] ?? null;
+}
+
 export function createGitHubWebhookHandlers(deps: GitHubWebhookDeps = {}) {
   const secret = deps.secret ?? process.env.GITHUB_WEBHOOK_SECRET ?? '';
   const enqueue = deps.enqueue ?? ((message: AgentMessage) => agentQueue.enqueue(message));
   const getProjectByRepo = deps.getProjectByRepo ?? defaultGetProjectByRepo;
   const getTaskByIssueNumber = deps.getTaskByIssueNumber ?? defaultGetTaskByIssueNumber;
+  const getProjectById = deps.getProjectById ?? defaultGetProjectById;
   const updateTask = deps.updateTask ?? defaultUpdateTask;
+  const syncTaskToTableFn =
+    deps.syncTaskToTable ?? ((task: SelectTask, project: SelectProject) => syncTaskToTable(task, project, registry.getDoc()));
   const now = deps.now ?? (() => new Date());
 
   return {
@@ -128,8 +140,12 @@ export function createGitHubWebhookHandlers(deps: GitHubWebhookDeps = {}) {
         const task = await getTaskByIssueNumber(payload.issue.number);
         if (task) {
           const completedAt = now();
+          const updatedTask = { ...task, status: 'done' as const, completedAt };
           await updateTask(task.id, { status: 'done', completedAt });
-          console.log('sync issue task to table placeholder', task.id);
+          const project = await getProjectById(task.projectId);
+          if (project) {
+            await syncTaskToTableFn(updatedTask, project);
+          }
           await enqueue({
             id: randomUUID(),
             from: 'zhongshui',

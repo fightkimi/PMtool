@@ -6,6 +6,7 @@ const ROOT = process.cwd();
 const ALLOWED_SCRIPT_FILES = new Set([
   'scripts/debug/showJobs.ts',
   'scripts/debug/simWecom.ts',
+  'scripts/debug/testTencentDoc.ts',
   'scripts/seed/index.ts',
   'scripts/seed/pipelines/ui_a.json',
   'scripts/seed/pipelines/ui_b.json',

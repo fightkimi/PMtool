@@ -4,11 +4,13 @@ import { callAIWithRetry } from '@/agents/base/aiUtils';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import type { AgentMessage } from '@/agents/base/types';
 import type { AIMessage } from '@/adapters/types';
+import { registry } from '@/adapters/registry';
 import { PipelineInstantiator } from '@/agents/zhongshu/PipelineInstantiator';
 import { detectCycle } from '@/agents/zhongshu/dagUtils';
 import { db } from '@/lib/db';
 import { extractJson } from '@/lib/parseJson';
 import { batchInsertTasks } from '@/lib/queries/tasks';
+import { syncTaskRowsToTable } from '@/lib/sync/tableSync';
 import {
   agentJobs,
   pipelines,
@@ -190,7 +192,7 @@ function expandCombinedTasks(content: string, tasks: ParsedTask[]): ParsedTask[]
 
 const tableSyncPlaceholder: TableSync = {
   async batchSyncTasksToTable(projectId: string, tasks: SelectTask[]) {
-    console.log('TASK 09 placeholder: sync tasks to table', { projectId, taskCount: tasks.length });
+    await syncTaskRowsToTable(projectId, tasks, registry.getDoc());
   }
 };
 

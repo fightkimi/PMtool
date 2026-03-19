@@ -5,6 +5,9 @@ import type { SelectPipelineStageInstance, SelectProject, SelectRisk, SelectTask
 import {
   batchSyncTasksToTable,
   getProjectForSync,
+  syncCapacitySnapshotsToTable,
+  syncTaskByIdToTable,
+  syncTaskRowsToTable,
   syncRiskToTable,
   syncStageByIdToTable,
   syncStageToTable,
@@ -25,11 +28,16 @@ const projectFixture: SelectProject = {
   wecomBotWebhook: null,
   wecomMgmtGroupId: null,
   smartTableRootId: null,
-  taskTableId: 'task-table-1',
-  pipelineTableId: null,
-  capacityTableId: null,
-  riskTableId: null,
-  changeTableId: null,
+  taskTableWebhook: 'task-table-1',
+  pipelineTableWebhook: null,
+  capacityTableWebhook: null,
+  riskTableWebhook: null,
+  changeTableWebhook: null,
+  taskTableSchema: {},
+  pipelineTableSchema: {},
+  capacityTableSchema: {},
+  riskTableSchema: {},
+  changeTableSchema: {},
   githubRepo: null,
   budget: { total: 0, spent: 0, token_budget: 0 },
   startedAt: null,
@@ -196,6 +204,39 @@ describe('tableSync', () => {
     expect((docAdapter.createRecord as unknown as ReturnType<typeof vi.fn>).mock.calls.length + (docAdapter.updateRecord as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(5);
   });
 
+  it('syncTaskRowsToTable syncs provided task rows without refetching task list', async () => {
+    const docAdapter = createDocAdapter('row-001');
+    const taskRows = [createTask('task-1'), createTask('task-2', 'row-002')];
+    vi.spyOn(projectQueries, 'getProjectById').mockResolvedValue(projectFixture);
+    const whereMock = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(db.update).mockReturnValue({ set: vi.fn().mockReturnValue({ where: whereMock }) } as never);
+
+    await syncTaskRowsToTable('project-1', taskRows, docAdapter);
+
+    expect(projectQueries.getProjectById).toHaveBeenCalledWith('project-1');
+    expect(docAdapter.createRecord).toHaveBeenCalledTimes(1);
+    expect(docAdapter.updateRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it('syncTaskByIdToTable loads task and project before syncing', async () => {
+    const docAdapter = createDocAdapter('row-001');
+    const task = createTask('task-1');
+    const whereTaskMock = vi.fn().mockResolvedValueOnce([task]);
+    const fromMock = vi.fn().mockReturnValue({ where: whereTaskMock });
+    const whereUpdateMock = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(projectQueries, 'getProjectById').mockResolvedValue(projectFixture);
+    vi.mocked(db.select).mockReturnValue({ from: fromMock } as never);
+    vi.mocked(db.update).mockReturnValue({ set: vi.fn().mockReturnValue({ where: whereUpdateMock }) } as never);
+
+    await syncTaskByIdToTable('task-1', docAdapter);
+
+    expect(projectQueries.getProjectById).toHaveBeenCalledWith('project-1');
+    expect(docAdapter.createRecord).toHaveBeenCalledWith(
+      'task-table-1',
+      expect.objectContaining({ 任务名: '任务-task-1' })
+    );
+  });
+
   it('syncs pipeline stage and risk records to their tables', async () => {
     const docAdapter = createDocAdapter('row-010');
     const stage = createStage();
@@ -203,8 +244,8 @@ describe('tableSync', () => {
     const whereMock = vi.fn().mockResolvedValue(undefined);
     vi.mocked(db.update).mockReturnValue({ set: vi.fn().mockReturnValue({ where: whereMock }) } as never);
 
-    await syncStageToTable(stage, { ...projectFixture, pipelineTableId: 'pipeline-table-1' }, 'Run-1', docAdapter);
-    await syncRiskToTable(risk, { ...projectFixture, riskTableId: 'risk-table-1' }, docAdapter);
+    await syncStageToTable(stage, { ...projectFixture, pipelineTableWebhook: 'pipeline-table-1' }, 'Run-1', docAdapter);
+    await syncRiskToTable(risk, { ...projectFixture, riskTableWebhook: 'risk-table-1' }, docAdapter);
 
     expect(docAdapter.createRecord).toHaveBeenCalledTimes(2);
   });
@@ -214,8 +255,8 @@ describe('tableSync', () => {
     const stage = createStage('row-stage');
     const risk = createRisk('row-risk');
 
-    await syncStageToTable(stage, { ...projectFixture, pipelineTableId: 'pipeline-table-1' }, 'Run-1', docAdapter);
-    await syncRiskToTable(risk, { ...projectFixture, riskTableId: 'risk-table-1' }, docAdapter);
+    await syncStageToTable(stage, { ...projectFixture, pipelineTableWebhook: 'pipeline-table-1' }, 'Run-1', docAdapter);
+    await syncRiskToTable(risk, { ...projectFixture, riskTableWebhook: 'risk-table-1' }, docAdapter);
 
     expect(docAdapter.updateRecord).toHaveBeenCalledWith(
       'pipeline-table-1',
@@ -241,7 +282,7 @@ describe('tableSync', () => {
     vi.mocked(db.select).mockReturnValue({ from: fromMock } as never);
     vi.mocked(db.update).mockReturnValue({ set: vi.fn().mockReturnValue({ where: whereUpdateMock }) } as never);
 
-    await syncStageByIdToTable('stage-1', { ...projectFixture, pipelineTableId: 'pipeline-table-1' }, docAdapter);
+    await syncStageByIdToTable('stage-1', { ...projectFixture, pipelineTableWebhook: 'pipeline-table-1' }, docAdapter);
 
     expect(docAdapter.createRecord).toHaveBeenCalledWith(
       'pipeline-table-1',
@@ -273,5 +314,68 @@ describe('tableSync', () => {
     const result = await getProjectForSync('project-1');
 
     expect(result).toEqual(projectFixture);
+  });
+
+  it('syncCapacitySnapshotsToTable creates and updates rows by member, role and week', async () => {
+    const docAdapter = createDocAdapter('cap-row-1');
+    const capacityProject = { ...projectFixture, capacityTableWebhook: 'capacity-table-1' };
+    const snapshots = [
+      {
+        userId: 'u1',
+        roleType: 'ui_designer',
+        weekStart: '2026-03-23',
+        availableHours: '8',
+        allocatedHours: '32'
+      },
+      {
+        userId: 'u2',
+        roleType: 'qa',
+        weekStart: '2026-03-23',
+        availableHours: '16',
+        allocatedHours: '24'
+      }
+    ];
+
+    const whereProjectMock = vi
+      .fn()
+      .mockResolvedValueOnce([capacityProject])
+      .mockResolvedValueOnce([
+        { id: 'u1', name: '设计甲', imUserId: 'debug-im-ui' },
+        { id: 'u2', name: '测试乙', imUserId: 'debug-im-qa' }
+      ]);
+    const fromMock = vi.fn().mockReturnValue({ where: whereProjectMock });
+    vi.mocked(db.select).mockReturnValue({ from: fromMock } as never);
+    vi.mocked(docAdapter.readTable).mockResolvedValue([
+      {
+        __record_id: 'existing-row-1',
+        成员: '设计甲',
+        工种: 'ui_designer',
+        周期: '2026-03-23'
+      }
+    ]);
+
+    await syncCapacitySnapshotsToTable('project-1', snapshots, docAdapter);
+
+    expect(docAdapter.updateRecord).toHaveBeenCalledWith(
+      'capacity-table-1',
+      'existing-row-1',
+      expect.objectContaining({
+        成员: '设计甲',
+        工种: 'ui_designer',
+        周期: '2026-03-23',
+        负载率: 80
+      })
+    );
+    expect(docAdapter.createRecord).toHaveBeenCalledWith(
+      'capacity-table-1',
+      expect.objectContaining({
+        成员: '测试乙',
+        工种: 'qa',
+        周期: '2026-03-23',
+        可用工时: 16,
+        已分配: 24,
+        负载率: 60
+      })
+    );
   });
 });

@@ -284,6 +284,7 @@ describe('WeComBotAdapter', () => {
 
   it('sendMessage sends aibot_respond_msg over websocket', async () => {
     const socket = new MockWebSocket();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
     const adapter = new WeComBotAdapter({
       botId: 'bot-id',
       botSecret: 'bot-secret',
@@ -307,6 +308,8 @@ describe('WeComBotAdapter', () => {
         text: { content: 'hello' }
       }
     });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
   });
 
   it('sendCard sends markdown content over websocket in bot mode', async () => {
@@ -402,6 +405,41 @@ describe('WeComBotAdapter', () => {
     expect(socket.send).toHaveBeenCalledTimes(1);
   });
 
+  it('deduplicates repeated websocket messages by msgid', async () => {
+    const socket = new MockWebSocket();
+    const listener = vi.fn();
+    const adapter = new WeComBotAdapter({
+      botId: 'bot-id',
+      botSecret: 'bot-secret',
+      wsFactory: vi.fn().mockReturnValue(socket)
+    });
+    adapter.onMessage(listener);
+
+    const startPromise = adapter.start();
+    await waitForListener(socket, 'open');
+    socket.emit('open');
+    await startPromise;
+
+    const payload = JSON.stringify({
+      cmd: 'aibot_msg_callback',
+      body: {
+        msgid: 'msg-1',
+        chatid: 'chat-1',
+        chattype: 'group',
+        from: { userid: 'user-1' },
+        msgtype: 'text',
+        text: { content: '你好' }
+      }
+    });
+
+    socket.emit('message', payload);
+    await Promise.resolve();
+    socket.emit('message', payload);
+    await Promise.resolve();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
   it('sends heartbeat ping after 30 seconds', async () => {
     const socket = new MockWebSocket();
     const adapter = new WeComBotAdapter({
@@ -423,6 +461,7 @@ describe('WeComBotAdapter', () => {
   it('reconnects automatically after websocket closes', async () => {
     const firstSocket = new MockWebSocket();
     const secondSocket = new MockWebSocket();
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
     const wsFactory = vi
       .fn()
       .mockReturnValueOnce(firstSocket)
@@ -443,10 +482,15 @@ describe('WeComBotAdapter', () => {
     vi.advanceTimersByTime(5000);
     await waitForListener(secondSocket, 'open');
     secondSocket.emit('open');
+    vi.advanceTimersByTime(30_000);
 
     expect(wsFactory).toHaveBeenCalledTimes(2);
     expect(wsFactory).toHaveBeenNthCalledWith(1, 'wss://openws.work.weixin.qq.com');
     expect(wsFactory).toHaveBeenNthCalledWith(2, 'wss://openws.work.weixin.qq.com');
+    expect(clearIntervalSpy).toHaveBeenCalled();
+    expect(firstSocket.ping).toHaveBeenCalledTimes(0);
+    expect(secondSocket.ping).toHaveBeenCalledTimes(1);
+    clearIntervalSpy.mockRestore();
   });
 
   it('reconnects after disconnected_event callback', async () => {
@@ -508,5 +552,31 @@ describe('WeComBotAdapter', () => {
         }
       })
     ).resolves.toBeNull();
+  });
+
+  it('logs send failure without throwing when websocket send throws', async () => {
+    const socket = new MockWebSocket();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    socket.send.mockImplementation((data: string) => {
+      const payload = JSON.parse(data);
+      if (payload.cmd === 'aibot_send_msg') {
+        throw new Error('boom');
+      }
+    });
+
+    const adapter = new WeComBotAdapter({
+      botId: 'bot-id',
+      botSecret: 'bot-secret',
+      wsFactory: vi.fn().mockReturnValue(socket)
+    });
+
+    const startPromise = adapter.start();
+    await waitForListener(socket, 'open');
+    socket.emit('open');
+    await startPromise;
+
+    await expect(adapter.sendMessage('chat-1', 'hello')).resolves.toBeUndefined();
+    expect(errorSpy).toHaveBeenCalledWith('[WeComBot] 发消息失败，已忽略:', 'boom');
+    errorSpy.mockRestore();
   });
 });

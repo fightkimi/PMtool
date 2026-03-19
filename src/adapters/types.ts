@@ -152,9 +152,8 @@ export interface WeComAdapterConfig {
 }
 
 export interface TencentDocAdapterConfig {
-  appId?: string;
-  appSecret?: string;
-  baseUrl?: string;
+  webhookUrls?: Record<string, string>;
+  webhookSchemas?: Record<string, Record<string, string>>;
   fetcher?: typeof fetch;
 }
 

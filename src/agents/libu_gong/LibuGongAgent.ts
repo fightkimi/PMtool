@@ -3,8 +3,10 @@ import { eq, inArray } from 'drizzle-orm';
 import { agentQueue, type AgentQueue } from '@/agents/base/AgentQueue';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import type { AgentMessage } from '@/agents/base/types';
+import { registry } from '@/adapters/registry';
 import { cpmEngine, type CPMEngine } from '@/agents/libu_gong/CPMEngine';
 import { db } from '@/lib/db';
+import { syncTaskRowsToTable } from '@/lib/sync/tableSync';
 import { tasks, type InsertTask, type SelectTask } from '@/lib/schema';
 
 type QueueLike = Pick<AgentQueue, 'enqueue'>;
@@ -37,7 +39,7 @@ export class LibuGongAgent extends BaseAgent {
     this.getTasksByIssueNumbersFn = deps.getTasksByIssueNumbers ?? defaultGetTasksByIssueNumbers;
     this.updateTaskFn = deps.updateTask ?? defaultUpdateTask;
     this.syncTasksToTableFn =
-      deps.syncTasksToTable ?? (async (_projectId, taskRows) => console.log('sync tasks placeholder', taskRows.length));
+      deps.syncTasksToTable ?? (async (projectId, taskRows) => syncTaskRowsToTable(projectId, taskRows, registry.getDoc()));
   }
 
   async handle(message: AgentMessage): Promise<AgentMessage> {

@@ -16,11 +16,16 @@ const projectFixture: SelectProject = {
   wecomBotWebhook: null,
   wecomMgmtGroupId: null,
   smartTableRootId: null,
-  taskTableId: null,
-  pipelineTableId: null,
-  capacityTableId: null,
-  riskTableId: null,
-  changeTableId: null,
+  taskTableWebhook: null,
+  pipelineTableWebhook: null,
+  capacityTableWebhook: null,
+  riskTableWebhook: null,
+  changeTableWebhook: null,
+  taskTableSchema: {},
+  pipelineTableSchema: {},
+  capacityTableSchema: {},
+  riskTableSchema: {},
+  changeTableSchema: {},
   githubRepo: 'fightkimi/PMtool',
   budget: { total: 0, spent: 0, token_budget: 0 },
   startedAt: null,
@@ -105,11 +110,15 @@ describe('github webhook', () => {
   it('updates task and enqueues progress_update when issue is closed', async () => {
     const enqueue = vi.fn().mockResolvedValue('job-1');
     const updateTask = vi.fn().mockResolvedValue(undefined);
+    const getProjectById = vi.fn().mockResolvedValue(projectFixture);
+    const syncTaskToTable = vi.fn().mockResolvedValue(undefined);
     const handlers = createGitHubWebhookHandlers({
       secret,
       enqueue,
       getTaskByIssueNumber: vi.fn().mockResolvedValue(taskFixture),
-      updateTask
+      getProjectById,
+      updateTask,
+      syncTaskToTable
     });
 
     await handlers.POST(
@@ -126,6 +135,14 @@ describe('github webhook', () => {
       expect.objectContaining({
         status: 'done'
       })
+    );
+    expect(getProjectById).toHaveBeenCalledWith('p1');
+    expect(syncTaskToTable).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'task-1',
+        status: 'done'
+      }),
+      projectFixture
     );
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({

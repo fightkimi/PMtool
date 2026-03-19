@@ -51,13 +51,13 @@ export class TableInitializer {
   constructor(private docAdapter: DocAdapter) {}
 
   async initProjectTables(rootId: string, projectName: string): Promise<{
-    task_table_id: string;
-    pipeline_table_id: string;
-    capacity_table_id: string;
-    risk_table_id: string;
-    change_table_id: string;
+    task_table_webhook: string;
+    pipeline_table_webhook: string;
+    capacity_table_webhook: string;
+    risk_table_webhook: string;
+    change_table_webhook: string;
   }> {
-    const [taskTableId, pipelineTableId, capacityTableId, riskTableId, changeTableId] = await Promise.all([
+    const [taskTableWebhook, pipelineTableWebhook, capacityTableWebhook, riskTableWebhook, changeTableWebhook] = await Promise.all([
       this.docAdapter.createTable(rootId, `${projectName}_任务总表`, taskFields),
       this.docAdapter.createTable(rootId, `${projectName}_管线排期表`, pipelineFields),
       this.docAdapter.createTable(rootId, `${projectName}_产能热力图`, capacityFields),
@@ -66,11 +66,11 @@ export class TableInitializer {
     ]);
 
     return {
-      task_table_id: taskTableId,
-      pipeline_table_id: pipelineTableId,
-      capacity_table_id: capacityTableId,
-      risk_table_id: riskTableId,
-      change_table_id: changeTableId
+      task_table_webhook: taskTableWebhook,
+      pipeline_table_webhook: pipelineTableWebhook,
+      capacity_table_webhook: capacityTableWebhook,
+      risk_table_webhook: riskTableWebhook,
+      change_table_webhook: changeTableWebhook
     };
   }
 }

@@ -8,11 +8,11 @@ type CompletePayload = {
   wecom_bot_webhook?: string;
   wecom_mgmt_group_id?: string;
   smart_table_root_id?: string;
-  task_table_id?: string;
-  pipeline_table_id?: string;
-  capacity_table_id?: string;
-  risk_table_id?: string;
-  change_table_id?: string;
+  task_table_webhook?: string;
+  pipeline_table_webhook?: string;
+  capacity_table_webhook?: string;
+  risk_table_webhook?: string;
+  change_table_webhook?: string;
 };
 
 export async function POST(request: Request) {
@@ -28,11 +28,11 @@ export async function POST(request: Request) {
       wecomBotWebhook: body.wecom_bot_webhook ?? null,
       wecomMgmtGroupId: body.wecom_mgmt_group_id ?? null,
       smartTableRootId: body.smart_table_root_id ?? null,
-      taskTableId: body.task_table_id ?? null,
-      pipelineTableId: body.pipeline_table_id ?? null,
-      capacityTableId: body.capacity_table_id ?? null,
-      riskTableId: body.risk_table_id ?? null,
-      changeTableId: body.change_table_id ?? null,
+      taskTableWebhook: body.task_table_webhook ?? null,
+      pipelineTableWebhook: body.pipeline_table_webhook ?? null,
+      capacityTableWebhook: body.capacity_table_webhook ?? null,
+      riskTableWebhook: body.risk_table_webhook ?? null,
+      changeTableWebhook: body.change_table_webhook ?? null,
       updatedAt: new Date()
     })
     .where(eq(projects.id, body.project_id));

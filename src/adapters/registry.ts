@@ -49,8 +49,7 @@ export const registry = new AdapterRegistry({
     mode: (process.env.WECOM_MODE as 'bot' | 'webhook' | undefined) ?? 'bot'
   },
   tencentdoc: {
-    appId: process.env.TENCENT_DOC_APP_ID,
-    appSecret: process.env.TENCENT_DOC_APP_SECRET
+    webhookUrls: {}
   },
   ai: {
     anthropicApiKey: process.env.ANTHROPIC_API_KEY,

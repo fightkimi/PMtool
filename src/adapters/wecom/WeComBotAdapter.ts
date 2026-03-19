@@ -71,6 +71,8 @@ export class WeComBotAdapter implements IMAdapter {
 
   private readonly replyContextByTarget = new Map<string, ReplyContext>();
 
+  private readonly processedMsgIds = new Set<string>();
+
   private socket: BotSocketLike | null = null;
 
   private heartbeatTimer: NodeJS.Timeout | null = null;
@@ -323,6 +325,7 @@ export class WeComBotAdapter implements IMAdapter {
       console.info(
         '[WeComBot] 收到消息回调:',
         JSON.stringify({
+          msgid: body?.msgid,
           chatid: body?.chatid,
           chattype: body?.chattype,
           from: body?.from?.userid,
@@ -330,6 +333,21 @@ export class WeComBotAdapter implements IMAdapter {
           text: body?.text?.content
         })
       );
+    }
+
+    const msgId = parsed.cmd === 'aibot_msg_callback' ? body?.msgid : undefined;
+    if (msgId && this.processedMsgIds.has(msgId)) {
+      console.info('[WeComBot] 重复消息，已忽略:', msgId);
+      return;
+    }
+    if (msgId) {
+      this.processedMsgIds.add(msgId);
+      if (this.processedMsgIds.size > 1000) {
+        const first = this.processedMsgIds.values().next().value;
+        if (typeof first === 'string') {
+          this.processedMsgIds.delete(first);
+        }
+      }
     }
 
     const incoming = await this.parseIncoming(parsed);
@@ -433,7 +451,14 @@ export class WeComBotAdapter implements IMAdapter {
       return;
     }
 
-    this.socket.send(JSON.stringify(payload));
+    try {
+      this.socket.send(JSON.stringify(payload));
+    } catch (error) {
+      console.error(
+        '[WeComBot] 发消息失败，已忽略:',
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   }
 
   private formatCardMarkdown(card: IMCard): string {

@@ -28,6 +28,7 @@ type WeComIncomingPayload =
 const DEFAULT_BASE_URL = 'https://qyapi.weixin.qq.com';
 const TOKEN_TTL_MS = 2 * 60 * 60 * 1000;
 const TOKEN_REFRESH_BUFFER_MS = 10 * 60 * 1000;
+const DEFAULT_RETRY_DELAYS_MS = [2000, 5000, 10000];
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -48,7 +49,11 @@ export async function withRetry<T>(
       console.error(`withRetry attempt ${attempt} failed`, error);
 
       if (attempt < maxRetries) {
-        await sleep(backoffMs * 2 ** (attempt - 1));
+        const delayMs =
+          backoffMs === 0
+            ? 0
+            : DEFAULT_RETRY_DELAYS_MS[Math.min(attempt - 1, DEFAULT_RETRY_DELAYS_MS.length - 1)] ?? backoffMs;
+        await sleep(delayMs);
       }
     }
   }

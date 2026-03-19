@@ -1,15 +1,19 @@
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import type { DocAdapter, DocRecord } from '@/adapters/types';
+import { TencentDocAdapter } from '@/adapters/tencentdoc/TencentDocAdapter';
 import { db } from '@/lib/db';
 import { getProjectById } from '@/lib/queries/projects';
 import { getTasksByProject } from '@/lib/queries/tasks';
 import {
+  capacitySnapshots,
   pipelineStageInstances,
   pipelineRuns,
   projects,
   risks,
   tasks,
+  users,
   type InsertTask,
+  type SelectCapacitySnapshot,
   type SelectPipelineRun,
   type SelectPipelineStageInstance,
   type SelectProject,
@@ -17,12 +21,35 @@ import {
   type SelectTask
 } from '@/lib/schema';
 
+const RECORD_ID_FIELD = '__record_id';
+
 function formatDate(value: Date | null | undefined): string {
   return value ? value.toLocaleDateString('zh-CN') : '';
 }
 
 function numericValue(value: number | string | null | undefined): number {
   return value == null ? 0 : Number(value);
+}
+
+function getRecordId(record: DocRecord | null | undefined): string | null {
+  const raw = record?.[RECORD_ID_FIELD];
+  return typeof raw === 'string' && raw.trim() ? raw : null;
+}
+
+function getProjectDocAdapter(
+  docAdapter: DocAdapter,
+  webhookUrl: string,
+  schema: Record<string, string> | null | undefined
+): DocAdapter {
+  if (!(docAdapter instanceof TencentDocAdapter)) {
+    return docAdapter;
+  }
+
+  return new TencentDocAdapter({
+    webhookSchemas: {
+      [webhookUrl]: schema ?? {}
+    }
+  });
 }
 
 async function getRunById(runId: string): Promise<SelectPipelineRun | null> {
@@ -35,9 +62,11 @@ export async function syncTaskToTable(
   project: SelectProject,
   docAdapter: DocAdapter
 ): Promise<void> {
-  if (!project.taskTableId) {
+  if (!project.taskTableWebhook) {
     return;
   }
+
+  const projectDocAdapter = getProjectDocAdapter(docAdapter, project.taskTableWebhook, project.taskTableSchema);
 
   const fields: DocRecord = {
     任务名: task.title,
@@ -51,13 +80,15 @@ export async function syncTaskToTable(
   };
 
   if (task.tableRecordId) {
-    await docAdapter.updateRecord(project.taskTableId, task.tableRecordId, fields);
+    await projectDocAdapter.updateRecord(project.taskTableWebhook, task.tableRecordId, fields);
     return;
   }
 
-  const recordId = await docAdapter.createRecord(project.taskTableId, fields);
-  await db.update(tasks).set({ tableRecordId: recordId }).where(eq(tasks.id, task.id));
-  task.tableRecordId = recordId;
+  const recordId = await projectDocAdapter.createRecord(project.taskTableWebhook, fields);
+  if (recordId) {
+    await db.update(tasks).set({ tableRecordId: recordId }).where(eq(tasks.id, task.id));
+    task.tableRecordId = recordId;
+  }
 }
 
 export async function syncStageToTable(
@@ -66,9 +97,15 @@ export async function syncStageToTable(
   runName: string,
   docAdapter: DocAdapter
 ): Promise<void> {
-  if (!project.pipelineTableId) {
+  if (!project.pipelineTableWebhook) {
     return;
   }
+
+  const projectDocAdapter = getProjectDocAdapter(
+    docAdapter,
+    project.pipelineTableWebhook,
+    project.pipelineTableSchema
+  );
 
   const fields: DocRecord = {
     Run名: runName,
@@ -82,13 +119,18 @@ export async function syncStageToTable(
   };
 
   if (stage.tableRecordId) {
-    await docAdapter.updateRecord(project.pipelineTableId, stage.tableRecordId, fields);
+    await projectDocAdapter.updateRecord(project.pipelineTableWebhook, stage.tableRecordId, fields);
     return;
   }
 
-  const recordId = await docAdapter.createRecord(project.pipelineTableId, fields);
-  await db.update(pipelineStageInstances).set({ tableRecordId: recordId }).where(eq(pipelineStageInstances.id, stage.id));
-  stage.tableRecordId = recordId;
+  const recordId = await projectDocAdapter.createRecord(project.pipelineTableWebhook, fields);
+  if (recordId) {
+    await db
+      .update(pipelineStageInstances)
+      .set({ tableRecordId: recordId })
+      .where(eq(pipelineStageInstances.id, stage.id));
+    stage.tableRecordId = recordId;
+  }
 }
 
 export async function syncRiskToTable(
@@ -96,9 +138,11 @@ export async function syncRiskToTable(
   project: SelectProject,
   docAdapter: DocAdapter
 ): Promise<void> {
-  if (!project.riskTableId) {
+  if (!project.riskTableWebhook) {
     return;
   }
+
+  const projectDocAdapter = getProjectDocAdapter(docAdapter, project.riskTableWebhook, project.riskTableSchema);
 
   const fields: DocRecord = {
     风险描述: risk.description,
@@ -109,13 +153,15 @@ export async function syncRiskToTable(
   };
 
   if (risk.tableRecordId) {
-    await docAdapter.updateRecord(project.riskTableId, risk.tableRecordId, fields);
+    await projectDocAdapter.updateRecord(project.riskTableWebhook, risk.tableRecordId, fields);
     return;
   }
 
-  const recordId = await docAdapter.createRecord(project.riskTableId, fields);
-  await db.update(risks).set({ tableRecordId: recordId }).where(eq(risks.id, risk.id));
-  risk.tableRecordId = recordId;
+  const recordId = await projectDocAdapter.createRecord(project.riskTableWebhook, fields);
+  if (recordId) {
+    await db.update(risks).set({ tableRecordId: recordId }).where(eq(risks.id, risk.id));
+    risk.tableRecordId = recordId;
+  }
 }
 
 export async function batchSyncTasksToTable(
@@ -131,6 +177,36 @@ export async function batchSyncTasksToTable(
   for (const task of taskRows) {
     await syncTaskToTable(task, project, docAdapter);
   }
+}
+
+export async function syncTaskRowsToTable(
+  projectId: string,
+  taskRows: SelectTask[],
+  docAdapter: DocAdapter
+): Promise<void> {
+  const project = await getProjectById(projectId);
+  if (!project) {
+    return;
+  }
+
+  for (const task of taskRows) {
+    await syncTaskToTable(task, project, docAdapter);
+  }
+}
+
+export async function syncTaskByIdToTable(taskId: string, docAdapter: DocAdapter): Promise<void> {
+  const rows = await db.select().from(tasks).where(eq(tasks.id, taskId));
+  const task = rows[0];
+  if (!task) {
+    return;
+  }
+
+  const project = await getProjectById(task.projectId);
+  if (!project) {
+    return;
+  }
+
+  await syncTaskToTable(task, project, docAdapter);
 }
 
 export async function syncStageByIdToTable(
@@ -175,4 +251,63 @@ export function tableRecordToTaskFields(record: DocRecord): Partial<InsertTask> 
 export async function getProjectForSync(projectId: string): Promise<SelectProject | null> {
   const rows = await db.select().from(projects).where(eq(projects.id, projectId));
   return rows[0] ?? null;
+}
+
+export async function syncCapacitySnapshotsToTable(
+  projectId: string,
+  snapshots: Array<
+    Pick<SelectCapacitySnapshot, 'userId' | 'roleType' | 'weekStart' | 'availableHours' | 'allocatedHours'>
+  >,
+  docAdapter: DocAdapter
+): Promise<void> {
+  const project = await getProjectForSync(projectId);
+  if (!project?.capacityTableWebhook || snapshots.length === 0) {
+    return;
+  }
+
+  const projectDocAdapter = getProjectDocAdapter(
+    docAdapter,
+    project.capacityTableWebhook,
+    project.capacityTableSchema
+  );
+
+  const memberIds = [...new Set(snapshots.map((snapshot) => snapshot.userId).filter((value): value is string => Boolean(value)))];
+  const memberRows = memberIds.length > 0 ? await db.select().from(users).where(inArray(users.id, memberIds)) : [];
+  const memberById = new Map(memberRows.map((member) => [member.id, member]));
+  const existingRows = await projectDocAdapter.readTable(project.capacityTableWebhook);
+
+  for (const snapshot of snapshots) {
+    const member = snapshot.userId ? memberById.get(snapshot.userId) : null;
+    const memberLabel = member?.name ?? member?.imUserId ?? snapshot.userId ?? '未分配';
+    const fields: DocRecord = {
+      成员: memberLabel,
+      工种: snapshot.roleType,
+      周期: snapshot.weekStart,
+      可用工时: numericValue(snapshot.availableHours),
+      已分配: numericValue(snapshot.allocatedHours),
+      负载率:
+        numericValue(snapshot.availableHours) + numericValue(snapshot.allocatedHours) === 0
+          ? 0
+          : Math.round(
+              (numericValue(snapshot.allocatedHours) /
+                (numericValue(snapshot.availableHours) + numericValue(snapshot.allocatedHours))) *
+                1000
+            ) / 10
+    };
+
+    const existing = existingRows.find(
+      (row) =>
+        String(row.成员 ?? '') === memberLabel &&
+        String(row.工种 ?? '') === snapshot.roleType &&
+        String(row.周期 ?? '') === snapshot.weekStart
+    );
+    const recordId = getRecordId(existing);
+
+    if (recordId) {
+      await projectDocAdapter.updateRecord(project.capacityTableWebhook, recordId, fields);
+      continue;
+    }
+
+    await projectDocAdapter.createRecord(project.capacityTableWebhook, fields);
+  }
 }

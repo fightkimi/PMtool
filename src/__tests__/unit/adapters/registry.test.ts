@@ -31,7 +31,7 @@ describe('AdapterRegistry', () => {
     const { AdapterRegistry } = await import('@/adapters/registry');
     const registry = new AdapterRegistry({
       wecom: { mode: 'bot', botId: 'bot-id', botSecret: 'bot-secret' },
-      tencentdoc: { appId: 'app', appSecret: 'secret' },
+      tencentdoc: { webhookUrls: { task: 'https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/webhook?key=test' } },
       ai: { anthropicApiKey: 'key' },
       code: { provider: 'github', token: 'gh-token' }
     });
