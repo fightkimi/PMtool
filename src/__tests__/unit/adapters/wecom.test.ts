@@ -339,7 +339,7 @@ describe('WeComBotAdapter', () => {
         chatid: 'chat-1',
         msgtype: 'markdown',
         markdown: {
-          content: '---\n\n# ⚠️ 计划审核未通过\n\n> 已退回中书省修正。\n\n**可执行操作**\n1. 查看详情'
+          content: '**⚠️ 计划审核未通过**\n\n已退回中书省修正。\n\n1. 查看详情'
         }
       }
     });
@@ -375,13 +375,14 @@ describe('WeComBotAdapter', () => {
     });
 
     const payload = JSON.parse(String(socket.send.mock.calls[1]?.[0]));
-    expect(payload.body.markdown.content).toContain('**🧾 审核结果**');
-    expect(payload.body.markdown.content).toContain('❌ 未通过');
-    expect(payload.body.markdown.content).toContain('**🚨 风险等级**');
-    expect(payload.body.markdown.content).toContain('🔴 高风险');
-    expect(payload.body.markdown.content).toContain('**⚠️ 主要问题**');
+    expect(payload.body.markdown.content).toContain('**⚠️ 计划审核未通过**');
+    expect(payload.body.markdown.content).toContain('**审核结果**');
+    expect(payload.body.markdown.content).toContain('未通过');
+    expect(payload.body.markdown.content).toContain('**风险等级**');
+    expect(payload.body.markdown.content).toContain('高风险');
+    expect(payload.body.markdown.content).toContain('**问题**');
     expect(payload.body.markdown.content).toContain('1. 需求边界不清');
-    expect(payload.body.markdown.content).toContain('**👉 下一步怎么补充**');
+    expect(payload.body.markdown.content).toContain('**下一步**');
   });
 
   it('logs an error instead of throwing when websocket is disconnected', async () => {

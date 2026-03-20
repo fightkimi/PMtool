@@ -36,6 +36,17 @@ type SnapshotInput = {
   overloadFlag: boolean;
 };
 
+type SnapshotAccumulator = {
+  workspaceId: string;
+  snapshotDate: string;
+  weekStart: string;
+  roleType: string;
+  userId: string | null;
+  totalHours: number;
+  allocatedHours: number;
+  projectBreakdown: Record<string, number>;
+};
+
 type CapacityDeps = BaseAgentDeps & {
   queue?: QueueLike;
   libuLiAgent?: Pick<LibuLiAgent, 'evaluateNewProject'>;
@@ -62,6 +73,31 @@ function daysOverlap(start: Date, end: Date, weekStart: Date, weekEnd: Date): nu
   const overlapStart = Math.max(start.getTime(), weekStart.getTime());
   const overlapEnd = Math.min(end.getTime(), weekEnd.getTime());
   return Math.max(0, Math.ceil((overlapEnd - overlapStart) / 86400000));
+}
+
+function snapshotAccumulatorKey(input: Pick<SnapshotAccumulator, 'weekStart' | 'roleType' | 'userId'>): string {
+  return [input.weekStart, input.roleType, input.userId ?? 'unassigned'].join('::');
+}
+
+function toSnapshotInput(input: SnapshotAccumulator): SnapshotInput {
+  const allocatedHours = Math.round(input.allocatedHours * 10) / 10;
+  const totalHours = Math.round(input.totalHours * 10) / 10;
+  const availableHours = Math.round((totalHours - allocatedHours) * 10) / 10;
+
+  return {
+    workspaceId: input.workspaceId,
+    snapshotDate: input.snapshotDate,
+    weekStart: input.weekStart,
+    roleType: input.roleType,
+    userId: input.userId,
+    totalHours: String(totalHours),
+    allocatedHours: String(allocatedHours),
+    availableHours: String(availableHours),
+    projectBreakdown: Object.fromEntries(
+      Object.entries(input.projectBreakdown).map(([projectId, hours]) => [projectId, Math.round(hours * 10) / 10])
+    ),
+    overloadFlag: allocatedHours > totalHours * 1.1
+  };
 }
 
 export class CapacityAgent extends BaseAgent {
@@ -113,6 +149,7 @@ export class CapacityAgent extends BaseAgent {
   private async handleDailySnapshot(payload: { workspace_id: string }): Promise<AgentMessage> {
     const projects = await this.getActiveProjectsFn(payload.workspace_id);
     const snapshotDate = this.currentTime().toISOString().slice(0, 10);
+    const workspaceSnapshotMap = new Map<string, SnapshotAccumulator>();
 
     for (const project of projects) {
       const projectSnapshots: SnapshotInput[] = [];
@@ -161,26 +198,49 @@ export class CapacityAgent extends BaseAgent {
           }
 
           const totalHours = Number(user.workHoursPerWeek ?? '40');
-          const overloadFlag = allocated > totalHours * 1.1;
+          const weekKey = weekStart.toISOString().slice(0, 10);
+          const projectHours = Math.round(allocated * 10) / 10;
           const snapshotPayload = {
             workspaceId: payload.workspace_id,
             snapshotDate,
-            weekStart: weekStart.toISOString().slice(0, 10),
+            weekStart: weekKey,
             roleType,
             userId: user.id,
             totalHours: String(totalHours),
-            allocatedHours: String(Math.round(allocated * 10) / 10),
-            availableHours: String(Math.round((totalHours - allocated) * 10) / 10),
-            projectBreakdown: { [project.id]: Math.round(allocated * 10) / 10 },
-            overloadFlag
+            allocatedHours: String(projectHours),
+            availableHours: String(Math.round((totalHours - projectHours) * 10) / 10),
+            projectBreakdown: { [project.id]: projectHours },
+            overloadFlag: projectHours > totalHours * 1.1
           } satisfies SnapshotInput;
 
-          await this.upsertSnapshotFn(snapshotPayload);
+          const aggregateKey = snapshotAccumulatorKey({ weekStart: weekKey, roleType, userId: user.id });
+          const existing = workspaceSnapshotMap.get(aggregateKey);
+          if (existing) {
+            existing.allocatedHours += projectHours;
+            existing.projectBreakdown[project.id] =
+              Math.round((((existing.projectBreakdown[project.id] ?? 0) + projectHours) * 10)) / 10;
+          } else {
+            workspaceSnapshotMap.set(aggregateKey, {
+              workspaceId: payload.workspace_id,
+              snapshotDate,
+              weekStart: weekKey,
+              roleType,
+              userId: user.id,
+              totalHours,
+              allocatedHours: projectHours,
+              projectBreakdown: { [project.id]: projectHours }
+            });
+          }
+
           projectSnapshots.push(snapshotPayload);
         }
       }
 
       await this.syncCapacityTableFn(project.id, projectSnapshots);
+    }
+
+    for (const snapshot of workspaceSnapshotMap.values()) {
+      await this.upsertSnapshotFn(toSnapshotInput(snapshot));
     }
 
     const overloads = await this.getOverloadedSnapshotsFn(payload.workspace_id);

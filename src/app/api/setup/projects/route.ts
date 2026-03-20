@@ -26,7 +26,7 @@ export function createSetupProjectsHandlers(deps: ProjectsDeps = {}) {
     async GET() {
       const workspace = await ensureWorkspaceFn();
       const rows = await listProjectsFn(workspace.id);
-      return Response.json(rows.map(mapProjectToSetupSummary));
+      return Response.json(rows.map((project) => mapProjectToSetupSummary(project)));
     },
 
     async POST(request: Request) {

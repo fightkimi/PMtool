@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+import { requestJson } from './lib/requestJson';
 
 type ProjectType = 'game_dev' | 'outsource' | 'office_app' | 'custom';
 
@@ -19,18 +20,6 @@ type TableIds = {
 };
 
 const steps = ['基本信息', '绑定企业微信', '绑定腾讯智能表格', '选择管线模板'];
-
-async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options?.headers ?? {})
-    }
-  });
-
-  return response.json() as Promise<T>;
-}
 
 export function SetupWizard() {
   const [step, setStep] = useState(0);

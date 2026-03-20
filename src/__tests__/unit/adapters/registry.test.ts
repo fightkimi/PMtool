@@ -5,6 +5,7 @@ const wecomWebhookInstance = { kind: 'im-webhook' };
 const docInstance = { kind: 'doc' };
 const aiInstance = { kind: 'ai' };
 const githubInstance = { kind: 'code' };
+const giteeInstance = { kind: 'code-gitee' };
 
 vi.mock('@/adapters/wecom/WeComBotAdapter', () => ({
   WeComBotAdapter: vi.fn().mockImplementation(() => wecomInstance)
@@ -24,6 +25,10 @@ vi.mock('@/adapters/ai/AIModelAdapter', () => ({
 
 vi.mock('@/adapters/github/GitHubAdapter', () => ({
   GitHubAdapter: vi.fn().mockImplementation(() => githubInstance)
+}));
+
+vi.mock('@/adapters/github/GiteeAdapter', () => ({
+  GiteeAdapter: vi.fn().mockImplementation(() => giteeInstance)
 }));
 
 describe('AdapterRegistry', () => {
@@ -58,5 +63,14 @@ describe('AdapterRegistry', () => {
     });
 
     expect(registry.getCode()).toBeUndefined();
+  });
+
+  it('supports gitee as code provider', async () => {
+    const { AdapterRegistry } = await import('@/adapters/registry');
+    const registry = new AdapterRegistry({
+      code: { provider: 'gitee', token: 'gitee-token' }
+    });
+
+    expect(registry.getCode()).toBe(giteeInstance);
   });
 });

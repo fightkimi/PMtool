@@ -14,6 +14,7 @@ import { syncTaskRowsToTable } from '@/lib/sync/tableSync';
 import {
   agentJobs,
   pipelines,
+  taskDepartmentValues,
   type InsertTask,
   type PipelineBusinessType,
   type PipelineComplexityTier,
@@ -150,11 +151,20 @@ function inferDepartment(text: string): ParsedTask['department'] {
   return 'libu_li';
 }
 
+function isValidDepartment(value: string): value is ParsedTask['department'] {
+  return (taskDepartmentValues as readonly string[]).includes(value);
+}
+
 function normalizeTask(content: string, task: ParsedTask): ParsedTask {
   const combined = `${task.title} ${task.description}`.trim();
   const inferredDepartment = inferDepartment(combined);
+  // AI 返回的 department 可能不在枚举范围内，需要兜底。
+  // 当 AI 只给出泛化的产品归属（libu_li），但文本已经显式表现为开发/测试等工种时，优先采用规则推断。
+  const aiDepartment = isValidDepartment(task.department) ? task.department : null;
   const department =
-    task.department === 'libu_li' && inferredDepartment !== 'libu_li' ? inferredDepartment : task.department;
+    !aiDepartment || (aiDepartment === 'libu_li' && inferredDepartment !== 'libu_li')
+      ? inferredDepartment
+      : aiDepartment;
 
   return {
     ...task,

@@ -4,6 +4,7 @@ import shangShuAgent from '@/agents/shangshu/ShangShuAgent';
 import zhongShuAgent from '@/agents/zhongshu/ZhongShuAgent';
 import zhongshuiAgent from '@/agents/zhongshui/ZhongshuiAgent';
 import { parse as parseIntent } from '@/adapters/wecom/IntentParser';
+import { registry } from '@/adapters/registry';
 import type { AgentMessage } from '@/agents/base/types';
 import { getProjectById } from '@/lib/queries/projects';
 
@@ -61,6 +62,9 @@ export async function POST(request: Request) {
   }
 
   const mode = body.mode ?? 'smoke';
+
+  // 确保 AI adapter 已加载 DB 中的配置（API Key、默认模型等）
+  await registry.ensureDbConfig();
 
   const stream = new ReadableStream({
     start(controller) {

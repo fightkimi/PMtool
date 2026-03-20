@@ -91,11 +91,36 @@ function getProviders(): ProviderConfig[] {
   return createBuiltinProviders();
 }
 
+// 前缀到 provider name 的映射，用于识别自定义模型 ID
+const MODEL_PREFIX_MAP: Record<string, string> = {
+  'doubao-': 'doubao',
+  'deepseek-': 'deepseek',
+  'glm-': 'zhipu',
+  'MiniMax-': 'minimax',
+  'claude-': 'claude',
+};
+
 export function resolveModel(aliasOrId: string): { provider: ProviderConfig; model: ModelConfig } | null {
-  for (const provider of getProviders()) {
+  const providers = getProviders();
+
+  // 精确匹配 alias 或 id
+  for (const provider of providers) {
     for (const model of provider.models) {
       if (model.alias === aliasOrId || model.id === aliasOrId) {
         return { provider, model };
+      }
+    }
+  }
+
+  // 前缀匹配：支持自定义模型 ID（如 Ark 平台的 doubao-seed-2-0-pro-260215）
+  for (const [prefix, providerName] of Object.entries(MODEL_PREFIX_MAP)) {
+    if (aliasOrId.startsWith(prefix)) {
+      const provider = providers.find((p) => p.name === providerName);
+      if (provider) {
+        return {
+          provider,
+          model: { id: aliasOrId, alias: aliasOrId, inputCostPer1M: 0, outputCostPer1M: 0 }
+        };
       }
     }
   }

@@ -1,4 +1,4 @@
-import { archiveWorkspaceProject, patchWorkspaceProject } from '@/app/api/setup/_dashboard';
+import { archiveWorkspaceProject, patchWorkspaceProject, validateProjectWebhookSchemas } from '@/app/api/setup/_dashboard';
 import type { ProjectType, SelectProject } from '@/lib/schema';
 
 type ProjectPatchPayload = Partial<{
@@ -25,6 +25,11 @@ export async function PATCH(
   context: { params: { id: string } }
 ) {
   const body = (await request.json()) as ProjectPatchPayload;
+  const validationError = validateProjectWebhookSchemas(body);
+  if (validationError) {
+    return Response.json({ error: validationError }, { status: 400 });
+  }
+
   const updated = await patchWorkspaceProject(context.params.id, body);
   if (!updated) {
     return Response.json({ error: '项目不存在' }, { status: 404 });

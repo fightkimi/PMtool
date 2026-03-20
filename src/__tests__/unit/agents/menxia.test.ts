@@ -297,13 +297,13 @@ describe('MenXiaAgent', () => {
       'https://example.com/hook',
       expect.objectContaining({
         title: '⚠️ 计划审核未通过',
-        content: expect.stringContaining('审核结果：\n\n未通过')
+        content: expect.stringContaining('🟢 低风险')
       })
     );
     expect(im.sendCard).toHaveBeenCalledWith(
       'https://example.com/hook',
       expect.objectContaining({
-        content: expect.stringContaining('下一步：\n\n1. 补充更明确的需求背景、验收标准和依赖说明后重试。')
+        content: expect.stringContaining('💡 补充更明确的需求背景、验收标准和依赖说明后重试。')
       })
     );
   });
@@ -347,25 +347,19 @@ describe('MenXiaAgent', () => {
       'https://example.com/hook',
       expect.objectContaining({
         title: '⚠️ 计划审核未通过',
-        content: expect.stringContaining('审核结果：\n\n未通过')
+        content: expect.stringContaining('🟡 中风险')
       })
     );
     expect(im.sendCard).toHaveBeenCalledWith(
       'https://example.com/hook',
       expect.objectContaining({
-        content: expect.stringContaining('风险等级：\n\n中风险')
+        content: expect.stringContaining('· 问题1\n· 问题2\n· 问题3')
       })
     );
     expect(im.sendCard).toHaveBeenCalledWith(
       'https://example.com/hook',
       expect.objectContaining({
-        content: expect.stringContaining('问题：\n\n1. 问题1\n2. 问题2\n3. 问题3')
-      })
-    );
-    expect(im.sendCard).toHaveBeenCalledWith(
-      'https://example.com/hook',
-      expect.objectContaining({
-        content: expect.stringContaining('下一步：\n\n1. 建议1\n2. 建议2')
+        content: expect.stringContaining('💡 建议1')
       })
     );
   });

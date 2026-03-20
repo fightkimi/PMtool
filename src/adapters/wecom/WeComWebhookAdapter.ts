@@ -215,6 +215,14 @@ export class WeComWebhookAdapter implements IMAdapter {
     }));
   }
 
+  getConnectionStatus() {
+    return {
+      connected: true,
+      mode: 'webhook' as const,
+      detail: 'Webhook 模式无持久连接'
+    };
+  }
+
   private async postAppMessage(accessToken: string, body: Record<string, unknown>): Promise<void> {
     const hasChatId = typeof body.chatid === 'string' && body.chatid.length > 0;
     const endpoint = hasChatId ? 'appchat/send' : 'message/send';

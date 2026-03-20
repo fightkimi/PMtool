@@ -2,6 +2,19 @@ import type { DocAdapter, DocField, DocFilter, DocRecord, TencentDocAdapterConfi
 
 const MAX_BATCH_SIZE = 100;
 
+// 逻辑字段名 → 可能的列名别名（按优先级排列）
+// 不同用户的智能表格列名可能不同，通过别名兜底匹配
+const FIELD_ALIASES: Record<string, string[]> = {
+  任务名: ['功能', '任务', '标题', 'title'],
+  状态: ['需求状态', '任务状态', 'status'],
+  负责人: ['人员', '责任人', '执行人', 'assignee'],
+  工种: ['岗位', '部门', '角色', 'department'],
+  估算工时: ['人天', '预估工时', '工时', 'hours'],
+  实际工时: ['实际人天', '已用工时'],
+  截止日期: ['结束时间', '截止时间', '到期日', 'due_date'],
+  优先级: ['priority'],
+};
+
 export class TencentDocAdapter implements DocAdapter {
   private readonly fetcher: typeof fetch;
   private readonly webhookSchemas: Record<string, Record<string, string>>;
@@ -18,6 +31,7 @@ export class TencentDocAdapter implements DocAdapter {
 
   async createRecord(webhookUrl: string, fields: DocRecord): Promise<string> {
     const schema = this.getWebhookSchema(webhookUrl);
+    this.assertSchemaAvailable(schema);
     const response = await this.fetcher(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -38,6 +52,7 @@ export class TencentDocAdapter implements DocAdapter {
     updates: Array<{ id: string; fields: Partial<DocRecord> }>
   ): Promise<void> {
     const schema = this.getWebhookSchema(webhookUrl);
+    this.assertSchemaAvailable(schema);
     for (let index = 0; index < updates.length; index += MAX_BATCH_SIZE) {
       const chunk = updates.slice(index, index + MAX_BATCH_SIZE);
       const response = await this.fetcher(webhookUrl, {
@@ -66,13 +81,25 @@ export class TencentDocAdapter implements DocAdapter {
   buildValues(fields: Partial<DocRecord>, schema: Record<string, string>): Record<string, unknown> {
     const result: Record<string, unknown> = {};
     const nameToId = Object.fromEntries(Object.entries(schema).map(([id, name]) => [name, id]));
+    const unmatchedKeys: string[] = [];
 
     for (const [key, value] of Object.entries(fields)) {
       if (value == null) {
         continue;
       }
 
-      const fieldId = nameToId[key] ?? key;
+      // 精确匹配 → 别名匹配 → 跳过（不使用中文名作为 fieldId，避免 API 报错）
+      let fieldId: string | undefined = nameToId[key];
+      if (!fieldId) {
+        const aliases = FIELD_ALIASES[key];
+        if (aliases) {
+          fieldId = aliases.map((alias) => nameToId[alias]).find((id): id is string => Boolean(id));
+        }
+      }
+      if (!fieldId) {
+        unmatchedKeys.push(key);
+        continue;
+      }
       if (typeof value === 'number') {
         result[fieldId] = value;
         continue;
@@ -88,6 +115,13 @@ export class TencentDocAdapter implements DocAdapter {
       }
     }
 
+    if (Object.keys(result).length === 0 && Object.keys(fields).some((key) => fields[key] != null)) {
+      const detail = unmatchedKeys.slice(0, 5).join('、');
+      throw new Error(
+        `智能表格字段映射未命中，请检查 schema 是否包含这些列名: ${detail || '当前写入字段'}`
+      );
+    }
+
     return result;
   }
 
@@ -95,8 +129,24 @@ export class TencentDocAdapter implements DocAdapter {
     // no-op: webhook mode does not use access_token
   }
 
+  withWebhookSchema(webhookUrl: string, schema: Record<string, string>): TencentDocAdapter {
+    return new TencentDocAdapter({
+      fetcher: this.fetcher,
+      webhookSchemas: {
+        ...this.webhookSchemas,
+        [webhookUrl]: schema
+      }
+    });
+  }
+
   private getWebhookSchema(webhookUrl: string): Record<string, string> {
     return this.webhookSchemas[webhookUrl] ?? this.webhookSchemas.default ?? {};
+  }
+
+  private assertSchemaAvailable(schema: Record<string, string>) {
+    if (Object.keys(schema).length === 0) {
+      throw new Error('腾讯智能表格缺少字段映射 schema，请粘贴 Webhook 示例 JSON 或 {"字段ID":"列名"} 映射');
+    }
   }
 
   private extractRecordId(record: unknown): string {

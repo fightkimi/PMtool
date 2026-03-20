@@ -91,6 +91,9 @@ async function enqueueWeeklyReports() {
 }
 
 export async function start() {
+  // 从 DB 加载 workspace 配置（API Key、默认模型等）
+  await registry.ensureDbConfig();
+
   const router = new AgentRouter();
   [
     zhongshuiAgent,

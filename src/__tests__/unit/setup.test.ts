@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createSetupProjectsHandlers } from '@/app/api/setup/projects/route';
+import { buildProjectPmSummary, mapProjectToSetupSummary, validateProjectWebhookSchemas } from '@/app/api/setup/_dashboard';
 import { createSetupStatusHandlers } from '@/app/api/setup/_status';
 import type { SelectProject, SelectWorkspace } from '@/lib/schema';
 
@@ -104,7 +105,10 @@ describe('setup', () => {
               pipeline: false,
               capacity: true,
               risk: false
-            }
+            },
+            tableHealth: [],
+            recentSyncs: [],
+            healthSummary: { readyTables: 0, syncedTables: 0, attentionTables: 0 }
           }
         ]
       })
@@ -220,7 +224,10 @@ describe('setup', () => {
               pipeline: Boolean(projectFixture.pipelineTableWebhook),
               capacity: Boolean(projectFixture.capacityTableWebhook),
               risk: Boolean(projectFixture.riskTableWebhook)
-            }
+            },
+            tableHealth: [],
+            recentSyncs: [],
+            healthSummary: { readyTables: 0, syncedTables: 0, attentionTables: 0 }
           }
         ]
       })
@@ -239,5 +246,91 @@ describe('setup', () => {
     expect(data.projects[0]?.tables.pipeline).toBe(false);
     expect(data.projects[0]?.tables.capacity).toBe(true);
     expect(data.projects[0]?.tables.risk).toBe(false);
+  });
+
+  it('requires schema when webhook is configured for a project table', () => {
+    expect(
+      validateProjectWebhookSchemas({
+        taskTableWebhook: 'https://example.com/webhook',
+        taskTableSchema: {}
+      })
+    ).toContain('任务表已配置 Webhook');
+
+    expect(
+      validateProjectWebhookSchemas({
+        taskTableWebhook: 'https://example.com/webhook',
+        taskTableSchema: { f1: '任务名' }
+      })
+    ).toBeNull();
+  });
+
+  it('maps project table health into readable summary states', () => {
+    const summary = mapProjectToSetupSummary(projectFixture, {
+      task: { lastSyncedAt: new Date('2026-03-20T06:00:00.000Z'), recordCount: 3 },
+      pipeline: { lastSyncedAt: null, recordCount: 0 },
+      capacity: { lastSyncedAt: null, recordCount: 0 },
+      risk: { lastSyncedAt: null, recordCount: 0 },
+      change: { lastSyncedAt: null, recordCount: 0 }
+    });
+
+    expect(summary.tableHealth.find((item) => item.key === 'task')).toEqual(
+      expect.objectContaining({
+        state: 'synced',
+        recordCount: 3,
+        lastSyncedAt: '2026-03-20T06:00:00.000Z'
+      })
+    );
+    expect(summary.tableHealth.find((item) => item.key === 'capacity')).toEqual(
+      expect.objectContaining({
+        state: 'needs_schema'
+      })
+    );
+    expect(summary.healthSummary).toEqual({
+      readyTables: 1,
+      syncedTables: 1,
+      attentionTables: 1
+    });
+    expect(summary.recentSyncs).toEqual([]);
+    expect(summary.pmSummary).toEqual(
+      expect.objectContaining({
+        attentionLevel: 'medium',
+        weeklyReportStatus: 'missing'
+      })
+    );
+  });
+
+  it('builds PM summary attention and highlights from project signals', () => {
+    const summary = buildProjectPmSummary(
+      {
+        blockedTaskCount: 1,
+        blockedStageCount: 1,
+        overdueTaskCount: 2,
+        dueSoonTaskCount: 1,
+        openRiskCount: 3,
+        criticalRiskCount: 1,
+        milestoneRiskCount: 1,
+        activeChangeCount: 2,
+        lastWeeklyReportAt: new Date('2026-03-10T08:00:00.000Z')
+      },
+      new Date('2026-03-20T08:00:00.000Z')
+    );
+
+    expect(summary).toEqual(
+      expect.objectContaining({
+        blockedCount: 2,
+        overdueCount: 2,
+        openRiskCount: 3,
+        criticalRiskCount: 1,
+        milestoneRiskCount: 1,
+        activeChangeCount: 2,
+        weeklyReportStatus: 'stale',
+        attentionLevel: 'high'
+      })
+    );
+    expect(summary.highlights).toEqual([
+      '阻塞 2 项，建议先确认责任人与恢复时间',
+      '逾期 2 项，需要重新校准交付承诺',
+      '里程碑风险 1 项，建议提前同步偏差'
+    ]);
   });
 });

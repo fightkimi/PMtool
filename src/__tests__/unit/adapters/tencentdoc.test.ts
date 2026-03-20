@@ -76,6 +76,37 @@ describe('TencentDocAdapter', () => {
     expect(recordId).toBe('record-1');
   });
 
+  it('createRecord throws a clear error when schema is missing', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const adapter = new TencentDocAdapter({ fetcher });
+
+    await expect(
+      adapter.createRecord('https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/webhook?key=xxx', {
+        功能: '测试'
+      })
+    ).rejects.toThrow('缺少字段映射 schema');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('createRecord throws a clear error when schema does not match fields', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const adapter = new TencentDocAdapter({
+      fetcher,
+      webhookSchemas: {
+        'https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/webhook?key=xxx': {
+          f1: '别的列'
+        }
+      }
+    });
+
+    await expect(
+      adapter.createRecord('https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/webhook?key=xxx', {
+        功能: '测试'
+      })
+    ).rejects.toThrow('字段映射未命中');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it('createRecord throws when webhook returns non-zero errcode', async () => {
     const fetcher = vi.fn<typeof fetch>().mockResolvedValueOnce(
       jsonResponse({
@@ -83,7 +114,14 @@ describe('TencentDocAdapter', () => {
         errmsg: 'invalid key'
       })
     );
-    const adapter = new TencentDocAdapter({ fetcher });
+    const adapter = new TencentDocAdapter({
+      fetcher,
+      webhookSchemas: {
+        'https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/webhook?key=xxx': {
+          f8b2fT: '功能'
+        }
+      }
+    });
 
     await expect(
       adapter.createRecord('https://qyapi.weixin.qq.com/cgi-bin/wedoc/smartsheet/webhook?key=xxx', {

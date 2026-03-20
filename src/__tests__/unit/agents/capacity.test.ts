@@ -54,7 +54,21 @@ function createStage(id: string, assigneeId: string, estimatedHours: number): Se
   };
 }
 
-function createAgent(overloadedSnapshots: SelectCapacitySnapshot[] = []) {
+function createProject(id: string, name: string): SelectProject {
+  return {
+    ...projectFixture,
+    id,
+    name
+  };
+}
+
+function createAgent(
+  overloadedSnapshots: SelectCapacitySnapshot[] = [],
+  options: {
+    activeProjects?: SelectProject[];
+    stagesByProject?: Record<string, SelectPipelineStageInstance[]>;
+  } = {}
+) {
   const im: IMAdapter = {
     sendMessage: vi.fn(),
     sendMarkdown: vi.fn(),
@@ -67,6 +81,10 @@ function createAgent(overloadedSnapshots: SelectCapacitySnapshot[] = []) {
   const upsertSnapshot = vi.fn().mockResolvedValue(undefined);
   const syncCapacityTable = vi.fn().mockResolvedValue(undefined);
   const enqueue = vi.fn().mockResolvedValue('bull-job-1');
+  const activeProjects = options.activeProjects ?? [projectFixture];
+  const stagesByProject = options.stagesByProject ?? {
+    [projectFixture.id]: [createStage('s1', 'u1', 48), createStage('s2', 'u2', 20)]
+  };
   const users: SelectUser[] = [
     {
       id: 'u1',
@@ -103,9 +121,9 @@ function createAgent(overloadedSnapshots: SelectCapacitySnapshot[] = []) {
     updateAgentJob: vi.fn(),
     queue: { enqueue },
     now: () => new Date('2026-03-17T00:00:00Z'),
-    getActiveProjects: vi.fn().mockResolvedValue([projectFixture]),
+    getActiveProjects: vi.fn().mockResolvedValue(activeProjects),
     getTasksByProject: vi.fn().mockResolvedValue([]),
-    getStagesByProject: vi.fn().mockResolvedValue([createStage('s1', 'u1', 48), createStage('s2', 'u2', 20)]),
+    getStagesByProject: vi.fn().mockImplementation(async (projectId: string) => stagesByProject[projectId] ?? []),
     getUsersByIds: vi.fn().mockResolvedValue(users),
     upsertSnapshot,
     syncCapacityTable,
@@ -185,5 +203,49 @@ describe('CapacityAgent', () => {
     });
 
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ to: 'libu_bing' }));
+  });
+
+  it('aggregates the same user workload across multiple projects instead of overwriting it', async () => {
+    const projectA = createProject('project-a', '项目A');
+    const projectB = createProject('project-b', '项目B');
+    const { agent, upsertSnapshot, syncCapacityTable } = createAgent([], {
+      activeProjects: [projectA, projectB],
+      stagesByProject: {
+        [projectA.id]: [createStage('a-1', 'u1', 24)],
+        [projectB.id]: [createStage('b-1', 'u1', 20)]
+      }
+    });
+
+    await agent.handle({
+      id: 'msg-1',
+      from: 'zhongshui',
+      to: 'capacity',
+      type: 'request',
+      payload: { workspace_id: 'workspace-1' },
+      context: { workspace_id: 'workspace-1', job_id: 'job-1', trace_ids: [] },
+      priority: 2,
+      created_at: new Date().toISOString()
+    });
+
+    expect(upsertSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'u1',
+        allocatedHours: '44',
+        availableHours: '-4',
+        overloadFlag: false,
+        projectBreakdown: {
+          'project-a': 24,
+          'project-b': 20
+        }
+      })
+    );
+    expect(syncCapacityTable).toHaveBeenCalledWith(
+      'project-a',
+      expect.arrayContaining([expect.objectContaining({ userId: 'u1', allocatedHours: '24' })])
+    );
+    expect(syncCapacityTable).toHaveBeenCalledWith(
+      'project-b',
+      expect.arrayContaining([expect.objectContaining({ userId: 'u1', allocatedHours: '20' })])
+    );
   });
 });

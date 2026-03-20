@@ -160,11 +160,10 @@ export class WeComBotAdapter implements IMAdapter {
 
   async sendCard(groupId: string, card: IMCard): Promise<void> {
     agentLogger.wecom(groupId, 'card', JSON.stringify(card));
-    const buttonLines = card.buttons?.length
-      ? `\n\n**可执行操作**\n${card.buttons.map((button, index) => `${index + 1}. ${button.text}`).join('\n')}`
-      : '';
-
     const content = this.formatCardMarkdown(card);
+    const buttonLines = card.buttons?.length
+      ? `\n\n${card.buttons.map((button, index) => `${index + 1}. ${button.text}`).join('\n')}`
+      : '';
 
     this.wsSend({
       cmd: 'aibot_send_msg',
@@ -245,6 +244,19 @@ export class WeComBotAdapter implements IMAdapter {
 
   async getGroupMembers(): Promise<IMUser[]> {
     return [];
+  }
+
+  getConnectionStatus() {
+    return {
+      connected: Boolean(this.socket && this.socket.readyState === WebSocket.OPEN),
+      mode: 'bot' as const,
+      detail:
+        this.socket && this.socket.readyState === WebSocket.OPEN
+          ? 'BOT WebSocket 已连接'
+          : this.started
+            ? 'BOT WebSocket 当前未连接'
+            : 'BOT WebSocket 尚未启动'
+    };
   }
 
   static clearTokenCache() {
@@ -462,83 +474,31 @@ export class WeComBotAdapter implements IMAdapter {
   }
 
   private formatCardMarkdown(card: IMCard): string {
-    const blocks = ['---', `# ${card.title}`];
-    for (const lines of this.parseCardSections(card.content)) {
-      const headingMatch = lines[0]?.match(/^(.+?)[：:]$/);
-      if (headingMatch) {
-        const heading = headingMatch[1];
-        const items = lines.slice(1);
-        blocks.push(this.formatCardSection(heading, items));
-        continue;
-      }
-
-      blocks.push(lines.map((line) => `> ${line}`).join('\n'));
-    }
-
-    return blocks.join('\n\n');
-  }
-
-  private parseCardSections(content: string): string[][] {
-    const lines = content
+    const formattedBody = card.content
       .split('\n')
       .map((line) => line.trim())
-      .filter(Boolean);
-    const sections: string[][] = [];
-    let current: string[] = [];
+      .map((line) => {
+        if (!line) {
+          return '';
+        }
+        if (line.startsWith('**') || line.startsWith('#')) {
+          return line;
+        }
+        if (/^(\d+\.\s|[-•]\s)/u.test(line)) {
+          return line;
+        }
+        if (/^[【\[].+[】\]]$/u.test(line)) {
+          return `**${line}**`;
+        }
+        if (/[：:]$/u.test(line)) {
+          return `**${line.replace(/[：:]$/u, '')}**`;
+        }
+        return line;
+      })
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n');
 
-    for (const line of lines) {
-      if (line.match(/^(.+?)[：:]$/) && current.length > 0) {
-        sections.push(current);
-        current = [line];
-        continue;
-      }
-
-      current.push(line);
-    }
-
-    if (current.length > 0) {
-      sections.push(current);
-    }
-
-    return sections;
-  }
-
-  private formatCardSection(heading: string, items: string[]): string {
-    switch (heading) {
-      case '审核结果': {
-        const value = items[0] ?? '待确认';
-        const label = value.includes('通过') && !value.includes('未') ? '✅ 通过' : '❌ 未通过';
-        return `**🧾 审核结果**\n${label}`;
-      }
-      case '风险等级': {
-        const value = items[0] ?? '待评估';
-        const label = value.includes('高')
-          ? '🔴 高风险'
-          : value.includes('中')
-            ? '🟡 中风险'
-            : '🟢 低风险';
-        return `**🚨 风险等级**\n${label}`;
-      }
-      case '问题':
-        return this.formatOrderedBlock('⚠️ 主要问题', items);
-      case '建议':
-        return this.formatOrderedBlock('💡 修正建议', items);
-      case '下一步':
-        return this.formatOrderedBlock('👉 下一步怎么补充', items);
-      default: {
-        const body = items.length > 0 ? items.join('\n') : '暂无';
-        return `**${heading}**\n${body}`;
-      }
-    }
-  }
-
-  private formatOrderedBlock(title: string, items: string[]): string {
-    const normalizedItems = items.length > 0 ? items : ['暂无'];
-    const numbered = normalizedItems.map((item, index) => {
-      const stripped = item.replace(/^\d+\.\s*/, '').trim();
-      return `${index + 1}. ${stripped}`;
-    });
-    return `**${title}**\n${numbered.join('\n')}`;
+    return `**${card.title}**\n\n${formattedBody}`;
   }
 
   private storeReplyContext(target: string, payload: BotEventPayload | SubscribeAckPayload | null) {

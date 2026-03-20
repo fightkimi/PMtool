@@ -24,6 +24,7 @@ type QueueLike = Pick<AgentQueue, 'enqueue'>;
 
 type TaskLike = SelectTask & { assignee?: SelectUser | null };
 type StageLike = SelectPipelineStageInstance & { assignee?: SelectUser | null };
+type MilestoneAlert = { name: string; delayDays: number; runId: string };
 
 type LibuBingDeps = BaseAgentDeps & {
   queue?: QueueLike;
@@ -35,6 +36,7 @@ type LibuBingDeps = BaseAgentDeps & {
   getVarianceTasks?: (projectId: string) => Promise<TaskLike[]>;
   getRunsByProjectId?: (projectId: string) => Promise<SelectPipelineRun[]>;
   getPipelineById?: (id: string) => Promise<SelectPipeline | null>;
+  getStagesByRun?: (runId: string) => Promise<SelectPipelineStageInstance[]>;
   getRiskByDescription?: (projectId: string, description: string) => Promise<SelectRisk | null>;
   createRisk?: (data: InsertRisk) => Promise<void>;
   updateRiskSeen?: (id: string, seenAt: Date) => Promise<void>;
@@ -44,6 +46,24 @@ type LibuBingDeps = BaseAgentDeps & {
 
 function daysDiff(target: Date, base: Date): number {
   return Math.ceil((target.getTime() - base.getTime()) / 86400000);
+}
+
+function formatDueDate(value: Date | null | undefined): string {
+  if (!value) {
+    return '--/--';
+  }
+
+  const month = String(value.getMonth() + 1).padStart(2, '0');
+  const day = String(value.getDate()).padStart(2, '0');
+  return `${month}/${day}`;
+}
+
+function summarizeItems(items: string[], emptyLabel = '无'): string {
+  if (items.length === 0) {
+    return emptyLabel;
+  }
+
+  return items.slice(0, 3).map((item) => `- ${item}`).join('\n');
 }
 
 export class LibuBingAgent extends BaseAgent {
@@ -67,6 +87,8 @@ export class LibuBingAgent extends BaseAgent {
 
   private readonly getPipelineByIdFn: (id: string) => Promise<SelectPipeline | null>;
 
+  private readonly getStagesByRunFn: (runId: string) => Promise<SelectPipelineStageInstance[]>;
+
   private readonly getRiskByDescriptionFn: (projectId: string, description: string) => Promise<SelectRisk | null>;
 
   private readonly createRiskFn: (data: InsertRisk) => Promise<void>;
@@ -88,6 +110,7 @@ export class LibuBingAgent extends BaseAgent {
     this.getVarianceTasksFn = deps.getVarianceTasks ?? defaultGetVarianceTasks;
     this.getRunsByProjectIdFn = deps.getRunsByProjectId ?? defaultGetRunsByProjectId;
     this.getPipelineByIdFn = deps.getPipelineById ?? defaultGetPipelineById;
+    this.getStagesByRunFn = deps.getStagesByRun ?? getStagesByRun;
     this.getRiskByDescriptionFn = deps.getRiskByDescription ?? defaultGetRiskByDescription;
     this.createRiskFn = deps.createRisk ?? defaultCreateRisk;
     this.updateRiskSeenFn = deps.updateRiskSeen ?? defaultUpdateRiskSeen;
@@ -112,10 +135,17 @@ export class LibuBingAgent extends BaseAgent {
     const cutoff = new Date(now.getTime() + 2 * 86400000);
 
     const blockedTasks = await this.getBlockedTasksFn(project.id);
+    const blockedStages = await this.getBlockedStagesFn(project.id);
     for (const task of blockedTasks) {
       const mention = task.assignee?.imUserId ?? task.assigneeId ?? '未分配';
       const description = `阻塞任务：${task.title}`;
       await this.notifyGroup(project.id, `🔴 [${project.name}] 阻塞任务：${task.title} · @${mention}`);
+      await this.upsertRisk(project.id, description, 'high');
+    }
+    for (const stage of blockedStages) {
+      const mention = stage.assignee?.imUserId ?? stage.assigneeId ?? '未分配';
+      const description = `阻塞阶段：${stage.stageKey}`;
+      await this.notifyGroup(project.id, `🔴 [${project.name}] 阻塞阶段：${stage.stageKey} · @${mention}`);
       await this.upsertRisk(project.id, description, 'high');
     }
 
@@ -152,7 +182,47 @@ export class LibuBingAgent extends BaseAgent {
       );
     }
 
-    await this.checkMilestoneRisk(project.id, project.name, now);
+    const milestoneAlerts = await this.checkMilestoneRisk(project.id, project.name, now);
+
+    await this.sendCard(project.id, {
+      title: `${project.name} 今日日报`,
+      content: [
+        '【今日概览】',
+        `阻塞事项：${blockedTasks.length + blockedStages.length} 项`,
+        `关键路径延期：${delayedStages.length} 项`,
+        `即将到期：${upcomingTasks.length} 项`,
+        `工时偏差：${varianceTasks.length} 项`,
+        `里程碑风险：${milestoneAlerts.length} 项`,
+        '',
+        '【重点事项】',
+        `阻塞：${summarizeItems(
+          [
+            ...blockedTasks.map((task) => `任务 ${task.title}`),
+            ...blockedStages.map((stage) => `阶段 ${stage.stageKey}`)
+          ],
+          '无'
+        )}`,
+        `到期：${summarizeItems(
+          upcomingTasks.map((task) => `${task.title} · ${formatDueDate(task.dueAt)}`),
+          '无'
+        )}`,
+        `里程碑：${summarizeItems(
+          milestoneAlerts.map((item) => `${item.name} 预计延后 ${item.delayDays} 天`),
+          '无'
+        )}`,
+        '',
+        '【PM 动作建议】',
+        blockedTasks.length + blockedStages.length > 0
+          ? '- 优先解除阻塞并确认责任人与恢复时间'
+          : '- 今日无阻塞，可按计划推进',
+        delayedStages.length > 0
+          ? '- 重新确认关键路径阶段资源与交付顺序'
+          : '- 关键路径当前稳定',
+        milestoneAlerts.length > 0
+          ? '- 提前同步里程碑偏差，准备范围/资源调整方案'
+          : '- 暂无里程碑升级风险'
+      ].join('\n')
+    });
 
     return this.createMessage(
       'libu_bing',
@@ -217,8 +287,9 @@ export class LibuBingAgent extends BaseAgent {
     );
   }
 
-  private async checkMilestoneRisk(projectId: string, projectName: string, now: Date): Promise<void> {
+  private async checkMilestoneRisk(projectId: string, projectName: string, now: Date): Promise<MilestoneAlert[]> {
     const runs = await this.getRunsByProjectIdFn(projectId);
+    const alerts: MilestoneAlert[] = [];
 
     for (const run of runs) {
       const pipeline = await this.getPipelineByIdFn(run.pipelineId);
@@ -226,7 +297,7 @@ export class LibuBingAgent extends BaseAgent {
         continue;
       }
 
-      const stages = await getStagesByRun(run.id);
+      const stages = await this.getStagesByRunFn(run.id);
       const criticalStages = stages.filter((stage) => Number(stage.floatDays ?? '0') === 0 && stage.plannedEnd);
       const latestCriticalEnd = criticalStages
         .map((stage) => stage.plannedEnd!)
@@ -243,6 +314,7 @@ export class LibuBingAgent extends BaseAgent {
 
         if (daysToAnchor <= 3 && latestCriticalEnd.getTime() > anchorDate.getTime()) {
           const delayDays = Math.ceil((latestCriticalEnd.getTime() - anchorDate.getTime()) / 86400000);
+          alerts.push({ name: anchor.name, delayDays, runId: run.id });
           await this.queue.enqueue(
             this.createMessage(
               'zhongshui',
@@ -262,6 +334,8 @@ export class LibuBingAgent extends BaseAgent {
         }
       }
     }
+
+    return alerts;
   }
 
   private async upsertRisk(projectId: string, description: string, level: InsertRisk['level']): Promise<void> {

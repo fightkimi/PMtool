@@ -8,6 +8,11 @@ export interface IMAdapter {
   sendDM(userId: string, content: IMMessage): Promise<void>;
   parseIncoming(payload: unknown): Promise<IncomingMessage | null>;
   getGroupMembers(groupId: string): Promise<IMUser[]>;
+  getConnectionStatus?(): {
+    connected: boolean;
+    mode: 'bot' | 'webhook';
+    detail?: string;
+  };
 }
 
 export interface DocAdapter {
@@ -164,6 +169,7 @@ export interface AnthropicMessageClient {
 }
 
 export interface AIAdapterConfig {
+  defaultModel?: string;
   anthropicApiKey?: string;
   deepseekApiKey?: string;
   anthropicModel?: string;
@@ -177,7 +183,7 @@ export interface AIAdapterConfig {
 }
 
 export interface CodeAdapterConfig {
-  provider?: 'github';
+  provider?: 'github' | 'gitee';
   token?: string;
 }
 

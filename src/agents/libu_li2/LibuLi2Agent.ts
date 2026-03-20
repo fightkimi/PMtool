@@ -1,4 +1,4 @@
-import { and, eq, gte, inArray, lte } from 'drizzle-orm';
+import { and, eq, gte, inArray, lte, ne } from 'drizzle-orm';
 import { BaseAgent, type BaseAgentDeps } from '@/agents/base/BaseAgent';
 import type { AgentMessage } from '@/agents/base/types';
 import { db } from '@/lib/db';
@@ -25,6 +25,9 @@ type LibuLi2Deps = BaseAgentDeps & {
   getUpcomingTasks?: (projectId: string, from: Date, to: Date) => Promise<SelectTask[]>;
   getUpcomingStages?: (projectId: string, from: Date, to: Date) => Promise<SelectPipelineStageInstance[]>;
   getNewRisks?: (projectId: string, from: Date, to: Date) => Promise<SelectRisk[]>;
+  getOpenRisks?: (projectId: string) => Promise<SelectRisk[]>;
+  getRecentChanges?: (projectId: string, from: Date, to: Date) => Promise<SelectChangeRequest[]>;
+  getCriticalStages?: (projectId: string, from: Date, to: Date) => Promise<SelectPipelineStageInstance[]>;
   insertWeeklyReport?: (data: InsertWeeklyReport) => Promise<void>;
   getTaskById?: (id: string) => Promise<SelectTask | null>;
   getUserById?: (id: string) => Promise<SelectUser | null>;
@@ -32,7 +35,7 @@ type LibuLi2Deps = BaseAgentDeps & {
   getUsersByIds?: (ids: string[]) => Promise<SelectUser[]>;
 };
 
-const WEEKLY_REPORT_PROMPT = `你是项目周报助手。基于以下项目数据，生成简洁周报（200字以内）。
+const WEEKLY_REPORT_PROMPT = `你是项目周报助手。基于以下项目数据，生成适合 PM 阅读的简洁周报归纳（180字以内）。
 
 数据：
 {{PROJECT_DATA}}
@@ -40,18 +43,17 @@ const WEEKLY_REPORT_PROMPT = `你是项目周报助手。基于以下项目数�
 格式（严格遵守，使用 markdown）：
 **【上周完成】**
 - 要点1
-- 要点2
-（3-5条，以结果为导向，说明具体完成了什么）
 
-**【本周计划】**
+**【下周关键推进】**
 - 要点1
-（3-5条）
 
-**【需关注】**
-- 风险1
-（2-3条，如无风险写"无"）
+**【PM需关注】**
+- 要点1
 
-语气：专业简洁，避免"正在进行中"等模糊词语，直接说结果。`;
+要求：
+1. 明确提到变更、关键路径、里程碑或风险中的核心信号；
+2. 避免空话，优先写结果、偏差和下周动作；
+3. 如果某一项没有内容，写“无”。`;
 
 const statusLabelMap: Record<SelectTask['status'], string> = {
   todo: '待开始',
@@ -74,6 +76,26 @@ function getWeekRange(base: Date) {
   return { monday, sunday };
 }
 
+function formatDate(value: Date | null | undefined): string {
+  if (!value) {
+    return '--/--';
+  }
+
+  return value.toISOString().slice(5, 10).replace('-', '/');
+}
+
+function summarizeBulletList(items: string[], emptyLabel = '无', limit = 3): string {
+  if (items.length === 0) {
+    return `- ${emptyLabel}`;
+  }
+
+  return items.slice(0, limit).map((item) => `- ${item}`).join('\n');
+}
+
+function sanitizeAiSummary(content: string): string {
+  return content.trim() || '**【上周完成】**\n- 无\n\n**【下周关键推进】**\n- 无\n\n**【PM需关注】**\n- 无';
+}
+
 export class LibuLi2Agent extends BaseAgent {
   readonly agentType = 'libu_li2' as const;
 
@@ -88,6 +110,12 @@ export class LibuLi2Agent extends BaseAgent {
   private readonly getUpcomingStagesFn: (projectId: string, from: Date, to: Date) => Promise<SelectPipelineStageInstance[]>;
 
   private readonly getNewRisksFn: (projectId: string, from: Date, to: Date) => Promise<SelectRisk[]>;
+
+  private readonly getOpenRisksFn: (projectId: string) => Promise<SelectRisk[]>;
+
+  private readonly getRecentChangesFn: (projectId: string, from: Date, to: Date) => Promise<SelectChangeRequest[]>;
+
+  private readonly getCriticalStagesFn: (projectId: string, from: Date, to: Date) => Promise<SelectPipelineStageInstance[]>;
 
   private readonly insertWeeklyReportFn: (data: InsertWeeklyReport) => Promise<void>;
 
@@ -107,6 +135,9 @@ export class LibuLi2Agent extends BaseAgent {
     this.getUpcomingTasksFn = deps.getUpcomingTasks ?? defaultGetUpcomingTasksThisWeek;
     this.getUpcomingStagesFn = deps.getUpcomingStages ?? defaultGetUpcomingStagesThisWeek;
     this.getNewRisksFn = deps.getNewRisks ?? defaultGetNewRisks;
+    this.getOpenRisksFn = deps.getOpenRisks ?? defaultGetOpenRisks;
+    this.getRecentChangesFn = deps.getRecentChanges ?? defaultGetRecentChanges;
+    this.getCriticalStagesFn = deps.getCriticalStages ?? defaultGetCriticalStagesThisWeek;
     this.insertWeeklyReportFn = deps.insertWeeklyReport ?? defaultInsertWeeklyReport;
     this.getTaskByIdFn = deps.getTaskById ?? defaultGetTaskById;
     this.getUserByIdFn = deps.getUserById ?? defaultGetUserById;
@@ -139,6 +170,10 @@ export class LibuLi2Agent extends BaseAgent {
     const upcomingTasks = await this.getUpcomingTasksFn(project.id, currentWeek.monday, currentWeek.sunday);
     const upcomingStages = await this.getUpcomingStagesFn(project.id, currentWeek.monday, currentWeek.sunday);
     const newRisks = await this.getNewRisksFn(project.id, lastWeekStart, lastWeekEnd);
+    const openRisks = await this.getOpenRisksFn(project.id);
+    const recentChanges = await this.getRecentChangesFn(project.id, lastWeekStart, currentWeek.sunday);
+    const criticalStages = await this.getCriticalStagesFn(project.id, currentWeek.monday, currentWeek.sunday);
+    const milestoneRisks = openRisks.filter((risk) => risk.description.startsWith('里程碑风险：'));
 
     const promptData = {
       project_name: project.name,
@@ -146,7 +181,19 @@ export class LibuLi2Agent extends BaseAgent {
       completed_stages: completedStages.map((stage) => stage.stageKey),
       upcoming_tasks: upcomingTasks.map((task) => task.title),
       upcoming_stages: upcomingStages.map((stage) => stage.stageKey),
-      new_risks: newRisks.map((risk) => risk.description)
+      new_risks: newRisks.map((risk) => risk.description),
+      open_risks: openRisks.map((risk) => ({ level: risk.level, description: risk.description })),
+      recent_changes: recentChanges.map((change) => ({
+        title: change.title,
+        status: change.status,
+        impact_days: change.scheduleImpactDays
+      })),
+      critical_path_stages: criticalStages.map((stage) => ({
+        stage_key: stage.stageKey,
+        due_at: stage.plannedEnd?.toISOString() ?? null,
+        status: stage.status
+      })),
+      milestone_risks: milestoneRisks.map((risk) => risk.description)
     };
 
     const aiResponse = await this.getAIAdapter().chat(
@@ -157,17 +204,63 @@ export class LibuLi2Agent extends BaseAgent {
       {}
     );
 
-    await this.notifyGroup(project.id, aiResponse.content);
+    const aiSummary = sanitizeAiSummary(aiResponse.content);
+    const nextWeekActions = [
+      recentChanges.length > 0 ? `优先确认 ${recentChanges.length} 项变更的影响面和执行窗口` : null,
+      criticalStages.length > 0 ? `盯紧 ${criticalStages.length} 个关键路径阶段，避免本周排期漂移` : null,
+      milestoneRisks.length > 0 ? `提前同步 ${milestoneRisks.length} 项里程碑偏差，准备资源或范围调整` : null,
+      openRisks.length > 0 ? `推动 ${openRisks.length} 项开放风险明确责任人与关闭时间` : null,
+      upcomingTasks.length > 0 ? `确认 ${upcomingTasks.length} 项本周到期任务的验收与交付节奏` : null
+    ].filter((item): item is string => Boolean(item));
+
+    const reportContent = [
+      '【周度摘要】',
+      `- 上周完成：任务 ${completedTasks.length} 项，阶段 ${completedStages.length} 项`,
+      `- 本周到期：任务 ${upcomingTasks.length} 项，关键阶段 ${criticalStages.length} 项`,
+      `- 风险与变更：开放风险 ${openRisks.length} 项，活跃变更 ${recentChanges.length} 项`,
+      `- 里程碑信号：${milestoneRisks.length > 0 ? `${milestoneRisks.length} 项偏差预警` : '当前无新增偏差'}`,
+      '',
+      '【关键路径 / 里程碑】',
+      summarizeBulletList(
+        criticalStages.map((stage) => `${stage.stageKey} · ${formatDate(stage.plannedEnd)} · ${stage.status}`),
+        '本周无关键路径压线阶段'
+      ),
+      summarizeBulletList(
+        milestoneRisks.map((risk) => risk.description.replace(/^里程碑风险：/, '')),
+        '暂无里程碑风险'
+      ),
+      '',
+      '【变更与风险】',
+      summarizeBulletList(
+        recentChanges.map((change) => `${change.title} · ${change.status} · 影响 ${change.scheduleImpactDays} 天`),
+        '本周暂无活跃变更'
+      ),
+      summarizeBulletList(
+        openRisks.map((risk) => `${risk.description} · ${risk.level}`),
+        '暂无开放风险'
+      ),
+      '',
+      '【AI归纳】',
+      aiSummary,
+      '',
+      '【下周 PM 动作】',
+      summarizeBulletList(nextWeekActions, '维持当前节奏，按周会节点评审即可')
+    ].join('\n');
+
+    await this.sendCard(project.id, {
+      title: `${project.name} 周报`,
+      content: reportContent
+    });
     await this.insertWeeklyReportFn({
       projectId: project.id,
       weekStart: lastWeekStart.toISOString().slice(0, 10),
-      content: aiResponse.content,
+      content: reportContent,
       generatedByAgent: true
     });
 
     return this.createMessage(
       'libu_li2',
-      { project_id: project.id, content: aiResponse.content },
+      { project_id: project.id, content: reportContent },
       {
         workspace_id: project.workspaceId,
         project_id: project.id,
@@ -192,10 +285,14 @@ export class LibuLi2Agent extends BaseAgent {
     }
     const assignee = task.assigneeId ? await this.getUserByIdFn(task.assigneeId) : null;
 
-    await this.notifyGroup(
-      project.id,
-      `${task.title} 状态更新：${statusLabelMap[payload.old_status]} → ${statusLabelMap[payload.new_status]} · @${assignee?.name ?? '未分配'}`
-    );
+    await this.sendCard(project.id, {
+      title: `${task.title} 进展同步`,
+      content: [
+        `状态：${statusLabelMap[payload.old_status]} → ${statusLabelMap[payload.new_status]}`,
+        `负责人：${assignee?.name ?? '未分配'}`,
+        `截止日期：${task.dueAt ? task.dueAt.toISOString().slice(5, 10).replace('-', '/') : '--/--'}`
+      ].join('\n')
+    });
 
     return this.createMessage(
       'libu_li2',
@@ -306,6 +403,51 @@ async function defaultGetNewRisks(projectId: string, from: Date, to: Date): Prom
     .select()
     .from(risks)
     .where(and(eq(risks.projectId, projectId), gte(risks.createdAt, from), lte(risks.createdAt, to)));
+}
+
+/* v8 ignore next */
+async function defaultGetOpenRisks(projectId: string): Promise<SelectRisk[]> {
+  return db
+    .select()
+    .from(risks)
+    .where(and(eq(risks.projectId, projectId), ne(risks.status, 'resolved')));
+}
+
+/* v8 ignore next */
+async function defaultGetRecentChanges(projectId: string, from: Date, to: Date): Promise<SelectChangeRequest[]> {
+  return db
+    .select()
+    .from(changeRequests)
+    .where(and(eq(changeRequests.projectId, projectId), gte(changeRequests.createdAt, from), lte(changeRequests.createdAt, to)));
+}
+
+/* v8 ignore next */
+async function defaultGetCriticalStagesThisWeek(projectId: string, from: Date, to: Date): Promise<SelectPipelineStageInstance[]> {
+  const runRows = await db
+    .select({
+      id: pipelineRuns.id,
+      pipelineId: pipelineRuns.pipelineId
+    })
+    .from(pipelineRuns)
+    .where(eq(pipelineRuns.projectId, projectId));
+
+  if (runRows.length === 0) {
+    return [];
+  }
+
+  const stageRows = await db
+    .select()
+    .from(pipelineStageInstances)
+    .where(
+      and(
+        inArray(pipelineStageInstances.runId, runRows.map((run) => run.id)),
+        gte(pipelineStageInstances.plannedEnd, from),
+        lte(pipelineStageInstances.plannedEnd, to),
+        ne(pipelineStageInstances.status, 'done')
+      )
+    );
+
+  return stageRows.filter((stage) => Number(stage.floatDays ?? '0') === 0);
 }
 
 /* v8 ignore next */

@@ -23,8 +23,9 @@ import {
 
 const RECORD_ID_FIELD = '__record_id';
 
-function formatDate(value: Date | null | undefined): string {
-  return value ? value.toLocaleDateString('zh-CN') : '';
+function formatDate(value: Date | null | undefined): number | null {
+  // 腾讯智能表格日期字段需要 Unix 毫秒时间戳
+  return value ? value.getTime() : null;
 }
 
 function numericValue(value: number | string | null | undefined): number {
@@ -45,11 +46,7 @@ function getProjectDocAdapter(
     return docAdapter;
   }
 
-  return new TencentDocAdapter({
-    webhookSchemas: {
-      [webhookUrl]: schema ?? {}
-    }
-  });
+  return docAdapter.withWebhookSchema(webhookUrl, schema ?? {});
 }
 
 async function getRunById(runId: string): Promise<SelectPipelineRun | null> {

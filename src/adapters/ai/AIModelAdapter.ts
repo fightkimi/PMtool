@@ -162,7 +162,7 @@ export class AIModelAdapter implements AIAdapter {
 
   private fetcher: typeof fetch;
 
-  private anthropicClient: AnthropicMessageClient;
+  private _anthropicClient: AnthropicMessageClient | null;
 
   constructor(config: AIAdapterConfig) {
     this.config = {
@@ -170,15 +170,23 @@ export class AIModelAdapter implements AIAdapter {
       ...config
     };
     this.fetcher = config.fetcher ?? fetch;
-    this.anthropicClient =
-      config.anthropicClient ??
-      new Anthropic({
-        apiKey: config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY
-      });
+    // 延迟初始化：只在使用 Claude 时才创建 Anthropic 客户端
+    this._anthropicClient = config.anthropicClient ?? null;
+  }
+
+  private get anthropicClient(): AnthropicMessageClient {
+    if (!this._anthropicClient) {
+      const apiKey = this.config.anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        throw new Error('缺少 Anthropic API Key，请在配置中设置或添加 ANTHROPIC_API_KEY 环境变量');
+      }
+      this._anthropicClient = new Anthropic({ apiKey });
+    }
+    return this._anthropicClient;
   }
 
   async chat(messages: AIMessage[], options: AIOptions = {}): Promise<AIResponse> {
-    const modelAlias = options.model ?? getAgentModelOverride(options.agentType) ?? process.env.DEFAULT_AI_MODEL ?? 'claude';
+    const modelAlias = options.model ?? getAgentModelOverride(options.agentType) ?? this.config.defaultModel ?? process.env.DEFAULT_AI_MODEL ?? 'claude';
     const resolved = resolveModel(modelAlias);
 
     if (!resolved) {
@@ -195,7 +203,7 @@ export class AIModelAdapter implements AIAdapter {
   }
 
   async *stream(messages: AIMessage[], options: AIOptions = {}): AsyncGenerator<string> {
-    const modelAlias = options.model ?? getAgentModelOverride(options.agentType) ?? process.env.DEFAULT_AI_MODEL ?? 'claude';
+    const modelAlias = options.model ?? getAgentModelOverride(options.agentType) ?? this.config.defaultModel ?? process.env.DEFAULT_AI_MODEL ?? 'claude';
     const resolved = resolveModel(modelAlias);
 
     if (!resolved) {

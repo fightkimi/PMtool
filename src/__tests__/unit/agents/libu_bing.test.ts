@@ -87,9 +87,14 @@ function createStage(overrides: Partial<SelectPipelineStageInstance> = {}): Sele
 
 function createAgent(overrides: {
   blockedTasks?: SelectTask[];
+  blockedStages?: SelectPipelineStageInstance[];
   delayedStages?: SelectPipelineStageInstance[];
   upcomingTasks?: SelectTask[];
   useDbRiskOps?: boolean;
+  varianceTasks?: SelectTask[];
+  runsByProjectId?: any[];
+  getPipelineById?: ReturnType<typeof vi.fn>;
+  stagesByRun?: SelectPipelineStageInstance[];
 } = {}) {
   const im: IMAdapter = {
     sendMessage: vi.fn(),
@@ -115,7 +120,7 @@ function createAgent(overrides: {
     getPMIMUserId: vi.fn().mockResolvedValue('pm-im-1'),
     now: () => new Date('2026-03-17T00:00:00Z'),
     getBlockedTasks: vi.fn().mockResolvedValue(overrides.blockedTasks ?? []),
-    getBlockedStages: vi.fn().mockResolvedValue([]),
+    getBlockedStages: vi.fn().mockResolvedValue(overrides.blockedStages ?? []),
     getDelayedCriticalStages: vi.fn().mockResolvedValue(overrides.delayedStages ?? []),
     getUpcomingTasks: vi
       .fn()
@@ -124,8 +129,10 @@ function createAgent(overrides: {
           (task) => task.dueAt != null && task.dueAt.getTime() < cutoff.getTime() && task.dueAt.getTime() >= now.getTime()
         )
       ),
-    getVarianceTasks: vi.fn().mockResolvedValue([]),
-    getRunsByProjectId: vi.fn().mockResolvedValue([]),
+    getVarianceTasks: vi.fn().mockResolvedValue(overrides.varianceTasks ?? []),
+    getRunsByProjectId: vi.fn().mockResolvedValue(overrides.runsByProjectId ?? []),
+    getPipelineById: overrides.getPipelineById ?? vi.fn().mockResolvedValue(null),
+    getStagesByRun: vi.fn().mockResolvedValue(overrides.stagesByRun ?? []),
     getRiskByDescription: overrides.useDbRiskOps ? undefined : vi.fn().mockResolvedValue(null),
     createRisk: overrides.useDbRiskOps ? undefined : vi.fn().mockResolvedValue(undefined),
     updateRiskSeen: overrides.useDbRiskOps ? undefined : vi.fn().mockResolvedValue(undefined),
@@ -159,6 +166,13 @@ describe('LibuBingAgent', () => {
     expect(im.sendMarkdown).toHaveBeenCalledWith(
       'https://example.com/hook',
       expect.stringContaining('阻塞任务')
+    );
+    expect(im.sendCard).toHaveBeenCalledWith(
+      'https://example.com/hook',
+      expect.objectContaining({
+        title: 'GW-PM 今日日报',
+        content: expect.stringContaining('阻塞事项：1 项')
+      })
     );
   });
 
@@ -238,5 +252,54 @@ describe('LibuBingAgent', () => {
     await agent.handle(message);
 
     expect(db.update).toHaveBeenCalled();
+  });
+
+  it('includes blocked stages, due soon tasks and milestone risk in summary card', async () => {
+    const { agent, im } = createAgent({
+      blockedTasks: [createTask({ title: '接口联调阻塞' })],
+      blockedStages: [createStage({ stageKey: 'QA 联调', status: 'blocked' })],
+      delayedStages: [createStage({ stageKey: '开发', plannedEnd: new Date('2026-03-16T00:00:00Z') })],
+      upcomingTasks: [createTask({ title: '验收回归', dueAt: new Date('2026-03-18T12:00:00Z'), status: 'in_progress' })],
+      varianceTasks: [createTask({ title: '登录修复', actualHours: 16, estimatedHours: 8, status: 'in_progress' })],
+      runsByProjectId: [
+        {
+          id: 'run-1',
+          pipelineId: 'pipeline-1',
+          projectId: 'project-1',
+          createdAt: new Date('2026-03-01T00:00:00Z')
+        }
+      ],
+      stagesByRun: [
+        createStage({
+          stageKey: '封版开发',
+          plannedEnd: new Date('2026-03-24T00:00:00Z'),
+          floatDays: 0
+        })
+      ],
+      getPipelineById: vi.fn().mockResolvedValue({
+        id: 'pipeline-1',
+        milestoneAnchors: [{ name: '封版', offset_weeks: 2 }]
+      })
+    });
+
+    await agent.handle({
+      id: 'msg-1',
+      from: 'zhongshui',
+      to: 'libu_bing',
+      type: 'request',
+      payload: { project_id: 'project-1' },
+      context: { workspace_id: 'workspace-1', project_id: 'project-1', job_id: 'job-1', trace_ids: [] },
+      priority: 2,
+      created_at: new Date().toISOString()
+    });
+
+    const card = vi.mocked(im.sendCard).mock.calls.at(-1)?.[1];
+    expect(card?.title).toBe('GW-PM 今日日报');
+    expect(card?.content).toContain('阻塞事项：2 项');
+    expect(card?.content).toContain('关键路径延期：1 项');
+    expect(card?.content).toContain('工时偏差：1 项');
+    expect(card?.content).toContain('里程碑风险：1 项');
+    expect(card?.content).toContain('阶段 QA 联调');
+    expect(card?.content).toContain('验收回归 · 03/18');
   });
 });
